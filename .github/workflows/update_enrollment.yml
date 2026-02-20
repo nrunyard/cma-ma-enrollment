@@ -1,0 +1,32 @@
+name: Update CMS MA Enrollment Data
+
+on:
+  schedule:
+    - cron: '0 10 15 * *'   # Runs on the 15th of every month at 10am UTC
+  workflow_dispatch:          # Lets you trigger it manually anytime too
+
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 pandas python-dateutil
+
+      - name: Run enrollment script
+        run: python cms_ma_enrollment_rolling_24mo.py
+
+      - name: Upload CSV as downloadable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ma-enrollment-rolling-24mo
+          path: ma_enrollment_rolling_24mo_*.csv
+          retention-days: 90   # GitHub keeps it for 90 days before auto-deleting
