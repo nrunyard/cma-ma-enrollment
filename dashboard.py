@@ -118,13 +118,22 @@ def _get_zip_url_from_page(page_url: str) -> str | None:
 
 
 # ── MA Plan Directory → CONTRACT_ID : PARENT_ORGANIZATION lookup ─────────────
+# Store raw plan directory columns globally so diagnostics can inspect them
+_plan_dir_raw_columns: list = []
+_plan_dir_contract_col: str = ""
+_plan_dir_parent_col: str = ""
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def load_plan_directory() -> pd.DataFrame:
     """
-    Downloads the MA Plan Directory and returns a DataFrame with at minimum:
-        CONTRACT_ID  |  PARENT_ORGANIZATION
+    Downloads the MA Plan Directory and returns a DataFrame with:
+        CONTRACT_ID  |  PARENT_ORGANIZATION  |  (PLAN_TYPE_DIR optional)
+    Tries multiple column name patterns to find the contract number column,
+    including the common "CONTRACT_NUMBER" name used in recent CMS files.
     Falls back gracefully if the file can't be fetched.
     """
+    global _plan_dir_raw_columns, _plan_dir_contract_col, _plan_dir_parent_col
+
     zip_url = _get_zip_url_from_page(CMS_PLAN_DIR_URL)
     if not zip_url:
         return pd.DataFrame(columns=["CONTRACT_ID", "PARENT_ORGANIZATION"])
@@ -133,36 +142,54 @@ def load_plan_directory() -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=["CONTRACT_ID", "PARENT_ORGANIZATION"])
 
-    # Find the contract ID column (first column starting with H/R/S + 4 digits)
-    contract_col = next(
-        (c for c in df.columns if re.search(r"CONTRACT.*(ID|NBR|NUM|NO)", c)), None
-    )
+    _plan_dir_raw_columns = list(df.columns)
+
+    # --- Find contract number column ---
+    # Priority order: exact names first, then pattern match, then value pattern
+    contract_col = None
+    for candidate in ["CONTRACT_NUMBER", "CONTRACT_ID", "CONTRACT_NO", "CONTRACT_NBR", "CONTRACTNUMBER"]:
+        if candidate in df.columns:
+            contract_col = candidate
+            break
     if contract_col is None:
-        # Try to detect by value pattern  e.g. H1234
+        contract_col = next(
+            (c for c in df.columns if re.search(r"CONTRACT.*(NUMBER|NUM|NBR|ID|NO)", c)), None
+        )
+    if contract_col is None:
+        # Detect by value pattern: H1234, R1234, S1234, E1234 etc.
         for c in df.columns:
-            sample = df[c].dropna().head(20)
+            sample = df[c].dropna().head(30).astype(str)
             if sample.str.match(r"^[A-Z]\d{4}$").sum() >= 5:
                 contract_col = c
                 break
 
-    # Find the parent org column
-    parent_col = next(
-        (c for c in df.columns if "PARENT" in c and "ORG" in c), None
-    )
+    # --- Find parent org column ---
+    parent_col = None
+    for candidate in ["PARENT_ORGANIZATION", "PARENT_ORG", "PARENT_ORGANIZATION_NAME"]:
+        if candidate in df.columns:
+            parent_col = candidate
+            break
+    if parent_col is None:
+        parent_col = next(
+            (c for c in df.columns if "PARENT" in c and "ORG" in c), None
+        )
     if parent_col is None:
         parent_col = next(
             (c for c in df.columns if "PARENT" in c), None
         )
 
+    _plan_dir_contract_col = contract_col or "(not found)"
+    _plan_dir_parent_col   = parent_col   or "(not found)"
+
     if contract_col is None or parent_col is None:
         return pd.DataFrame(columns=["CONTRACT_ID", "PARENT_ORGANIZATION"])
 
-    # Find plan/contract type column in directory
+    # --- Find plan/contract type column ---
     type_col = next(
         (c for c in df.columns if re.search(r"(PLAN|CONTRACT).*(TYPE|TYP)", c)), None
     )
 
-    keep_cols = [contract_col, parent_col]
+    keep_cols   = [contract_col, parent_col]
     rename_dict = {contract_col: "CONTRACT_ID", parent_col: "PARENT_ORGANIZATION"}
     if type_col:
         keep_cols.append(type_col)
@@ -174,9 +201,8 @@ def load_plan_directory() -> pd.DataFrame:
         .dropna(subset=["CONTRACT_ID"])
         .drop_duplicates(subset=["CONTRACT_ID"])
     )
-    lookup["CONTRACT_ID"]         = lookup["CONTRACT_ID"].str.strip().str.upper()
-    lookup["PARENT_ORGANIZATION"] = lookup["PARENT_ORGANIZATION"].str.strip().str.title()
-    # Consolidate fragmented entity names into canonical parent org names
+    lookup["CONTRACT_ID"]         = lookup["CONTRACT_ID"].astype(str).str.strip().str.upper()
+    lookup["PARENT_ORGANIZATION"] = lookup["PARENT_ORGANIZATION"].astype(str).str.strip().str.title()
     lookup["PARENT_ORGANIZATION"] = consolidate_parent_org(lookup["PARENT_ORGANIZATION"])
     if "PLAN_TYPE_DIR" in lookup.columns:
         lookup["PLAN_TYPE_DIR"] = lookup["PLAN_TYPE_DIR"].str.strip().str.title()
@@ -442,6 +468,17 @@ if not plan_dir.empty and "CONTRACT_ID" in df.columns:
             f"- **Unique contract IDs in plan directory:** "
             f"{plan_dir['CONTRACT_ID'].nunique():,}"
         )
+        # Show raw column names from both files — key for diagnosing join mismatches
+        st.markdown("**Plan Directory raw columns:**")
+        st.code(", ".join(_plan_dir_raw_columns) if _plan_dir_raw_columns else "(not loaded)")
+        st.markdown(
+            f"- Contract col detected as: `{_plan_dir_contract_col}`\n"
+            f"- Parent org col detected as: `{_plan_dir_parent_col}`"
+        )
+        enroll_cols = [c for c in df.columns if c not in ["PARENT_ORGANIZATION", "PLAN_TYPE_DIR", "CONTRACT_TYPE"]]
+        st.markdown("**Enrollment file columns:**")
+        st.code(", ".join(enroll_cols))
+
         if unmatched_rows > 0:
             unmatched_ids = (
                 df[df["PARENT_ORGANIZATION"].isna()]["CONTRACT_ID"]
