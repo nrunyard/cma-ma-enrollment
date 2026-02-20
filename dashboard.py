@@ -497,7 +497,7 @@ if not plan_dir.empty and "CONTRACT_ID" in df.columns:
             )
             unmatched_ids.columns = ["CONTRACT_ID_IN_ENROLLMENT", "ROW_COUNT"]
             st.markdown("**Top unmatched contract IDs (in enrollment but not in directory):**")
-            st.dataframe(unmatched_ids, width='stretch')
+            st.dataframe(unmatched_ids, use_container_width=True)
             dir_sample    = plan_dir["CONTRACT_ID"].dropna().head(10).tolist()
             enroll_sample = df["CONTRACT_ID"].dropna().head(10).tolist()
             st.markdown(f"**Sample IDs from plan directory:** `{dir_sample}`")
@@ -512,7 +512,7 @@ if not plan_dir.empty and "CONTRACT_ID" in df.columns:
         )
         top_orgs.columns = ["Parent Organization", "Total Enrollment"]
         top_orgs["Total Enrollment"] = top_orgs["Total Enrollment"].apply(lambda x: f"{x:,.0f}")
-        st.dataframe(top_orgs, width='stretch')
+        st.dataframe(top_orgs, use_container_width=True)
 else:
     has_parent_org = False
     # Still derive contract type from CONTRACT_ID even without the directory
@@ -698,9 +698,9 @@ with tabs[0]:
         labels={"REPORT_PERIOD": "Period", "ENROLLMENT": "Enrollees"},
     )
     fig.update_layout(hovermode="x unified")
-    st.plotly_chart(fig, width='stretch')
+    st.plotly_chart(fig, use_container_width=True)
     with st.expander("View data table"):
-        st.dataframe(trend, width='stretch')
+        st.dataframe(trend, use_container_width=True)
 
 # Tab 2 ── State / County
 with tabs[1]:
@@ -719,14 +719,14 @@ with tabs[1]:
             title=f"Top 30 by {geo_col.title()} — {latest_period}",
             color="ENROLLMENT", color_continuous_scale="Blues",
         )
-        st.plotly_chart(fig2, width='stretch')
+        st.plotly_chart(fig2, use_container_width=True)
         with st.expander("View full table"):
             full_geo = (
                 filtered[filtered["REPORT_PERIOD"] == latest_period]
                 .groupby(geo_col)["ENROLLMENT"].sum()
                 .reset_index().sort_values("ENROLLMENT", ascending=False)
             )
-            st.dataframe(full_geo, width='stretch')
+            st.dataframe(full_geo, use_container_width=True)
 
 # Tab 3 ── Contract / Plan
 with tabs[2]:
@@ -748,14 +748,14 @@ with tabs[2]:
             color="ENROLLMENT", color_continuous_scale="Teal",
         )
         fig3.update_layout(yaxis={"categoryorder": "total ascending"})
-        st.plotly_chart(fig3, width='stretch')
+        st.plotly_chart(fig3, use_container_width=True)
         with st.expander("View full table"):
             all_c = (
                 filtered[filtered["REPORT_PERIOD"] == latest_period]
                 .groupby(contract_col)["ENROLLMENT"].sum()
                 .reset_index().sort_values("ENROLLMENT", ascending=False)
             )
-            st.dataframe(all_c, width='stretch')
+            st.dataframe(all_c, use_container_width=True)
 
 # Tab 4 ── Period-over-Period
 with tabs[3]:
@@ -783,17 +783,17 @@ with tabs[3]:
         col_a, col_b = st.columns(2)
         with col_a:
             st.subheader(f"📈 Biggest Gainers  ({previous_period} → {latest_period})")
-            st.dataframe(mom.head(15)[cols_show].style.format(fmt), width='stretch')
+            st.dataframe(mom.head(15)[cols_show].style.format(fmt), use_container_width=True)
         with col_b:
             st.subheader(f"📉 Biggest Decliners  ({previous_period} → {latest_period})")
-            st.dataframe(mom.tail(15)[cols_show].sort_values("CHANGE").style.format(fmt), width='stretch')
+            st.dataframe(mom.tail(15)[cols_show].sort_values("CHANGE").style.format(fmt), use_container_width=True)
 
         fig4 = px.bar(
             mom.head(20), x=group_choice, y="CHANGE",
             title=f"Top 20 Change by {group_choice.replace('_',' ').title()}  ({previous_period} → {latest_period})",
             color="CHANGE", color_continuous_scale="RdYlGn", color_continuous_midpoint=0,
         )
-        st.plotly_chart(fig4, width='stretch')
+        st.plotly_chart(fig4, use_container_width=True)
 
 # Tab 5 ── By Parent Organization (only shown if data available)
 if has_parent_org:
@@ -815,7 +815,7 @@ if has_parent_org:
             color="ENROLLMENT", color_continuous_scale="Purples",
         )
         fig5.update_layout(yaxis={"categoryorder": "total ascending"})
-        st.plotly_chart(fig5, width='stretch')
+        st.plotly_chart(fig5, use_container_width=True)
 
         # Trend by parent org over time
         if len(periods_loaded) > 1:
@@ -834,7 +834,7 @@ if has_parent_org:
                         "PARENT_ORGANIZATION": "Parent Org"},
             )
             fig6.update_layout(hovermode="x unified")
-            st.plotly_chart(fig6, width='stretch')
+            st.plotly_chart(fig6, use_container_width=True)
 
         # Market share pie
         fig7 = px.pie(
@@ -843,10 +843,10 @@ if has_parent_org:
             title=f"Market Share — Top 10 Parent Organizations ({latest_period})",
         )
         fig7.update_traces(textposition="inside", textinfo="percent+label")
-        st.plotly_chart(fig7, width='stretch')
+        st.plotly_chart(fig7, use_container_width=True)
 
         with st.expander("View full parent organization table"):
-            st.dataframe(parent_enroll, width='stretch')
+            st.dataframe(parent_enroll, use_container_width=True)
 
 st.divider()
 st.caption(
