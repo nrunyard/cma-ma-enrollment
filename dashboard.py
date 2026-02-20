@@ -396,9 +396,6 @@ if not selected_periods:
     st.info("👈 Select at least one period in the sidebar to begin.")
     st.stop()
 
-st.sidebar.markdown("### Compare Periods")
-st.sidebar.caption("Choose which two periods to compare in KPIs and the Period-over-Period tab.")
-
 # ── Load enrollment data ──────────────────────────────────────────────────────
 st.title("🏥 CMS Medicare Advantage Enrollment")
 
@@ -624,58 +621,87 @@ if selected_contracts and contract_col_for_filter and contract_col_for_filter in
 
 filtered = df[mask].copy()
 
-# ── Comparison period selectors (sidebar, rendered now that periods_loaded is known) ──
-# Use the pre-filter periods_loaded so options are stable regardless of other filters
-_all_periods_for_compare = sorted(df["REPORT_PERIOD"].dropna().unique())
+# ── Period references ─────────────────────────────────────────────────────────
+# latest  = most recent period in loaded data
+# yoy     = same month one year prior (e.g. 2026-02 → 2025-02)
+# mom     = prior calendar month (e.g. 2026-02 → 2026-01)
+all_loaded_periods = sorted(filtered["REPORT_PERIOD"].dropna().unique())
+latest_period  = all_loaded_periods[-1] if all_loaded_periods else None
+mom_period     = all_loaded_periods[-2] if len(all_loaded_periods) >= 2 else None
 
-compare_current = st.sidebar.selectbox(
-    "Current period",
-    options=_all_periods_for_compare,
-    index=len(_all_periods_for_compare) - 1,
-    help="The 'current' period shown in KPIs and Period-over-Period tab",
-)
+# Derive YoY period: same month, one year earlier
+def _yoy_period(p):
+    """Return same-month period from prior year, e.g. '2026-02' → '2025-02'."""
+    try:
+        y, m = p.split("-")
+        return f"{int(y)-1}-{m}"
+    except Exception:
+        return None
 
-# Build prior period options — always the full list so index never goes out of bounds
-_prior_options = [p for p in _all_periods_for_compare if p != compare_current]
-_prior_default = max(0, len(_prior_options) - 1)  # safe index regardless of list length
+yoy_period_label = _yoy_period(latest_period) if latest_period else None
+# Only use yoy if that period was actually loaded
+yoy_period = yoy_period_label if yoy_period_label in all_loaded_periods else None
 
-compare_previous = st.sidebar.selectbox(
-    "Compare to period",
-    options=_prior_options,
-    index=_prior_default,
-    help="The 'prior' period to compare against",
-) if _prior_options else None
+# Prior Dec: December of the year before the latest period's year
+def _prior_dec(p):
+    """Return December of the prior year, e.g. '2026-02' → '2025-12'."""
+    try:
+        y, m = p.split("-")
+        return f"{int(y)-1}-12"
+    except Exception:
+        return None
 
-latest_period   = compare_current
-previous_period = compare_previous
+prior_dec_label = _prior_dec(latest_period) if latest_period else None
+prior_dec_period = prior_dec_label if prior_dec_label in all_loaded_periods else None
 
 # ── KPI row ───────────────────────────────────────────────────────────────────
-latest_enroll   = filtered[filtered["REPORT_PERIOD"] == latest_period]["ENROLLMENT"].sum()
-previous_enroll = (
-    filtered[filtered["REPORT_PERIOD"] == previous_period]["ENROLLMENT"].sum()
-    if previous_period else None
-)
-mom_delta = (latest_enroll - previous_enroll) if previous_enroll else None
-mom_pct   = (mom_delta / previous_enroll * 100) if previous_enroll else None
+latest_enroll = filtered[filtered["REPORT_PERIOD"] == latest_period]["ENROLLMENT"].sum() if latest_period else 0
+
+mom_enroll = filtered[filtered["REPORT_PERIOD"] == mom_period]["ENROLLMENT"].sum() if mom_period else None
+mom_delta  = (latest_enroll - mom_enroll) if mom_enroll is not None else None
+mom_pct    = (mom_delta / mom_enroll * 100) if mom_enroll else None
+
+yoy_enroll = filtered[filtered["REPORT_PERIOD"] == yoy_period]["ENROLLMENT"].sum() if yoy_period else None
+yoy_delta  = (latest_enroll - yoy_enroll) if yoy_enroll is not None else None
+yoy_pct    = (yoy_delta / yoy_enroll * 100) if yoy_enroll else None
+
+prior_dec_enroll = filtered[filtered["REPORT_PERIOD"] == prior_dec_period]["ENROLLMENT"].sum() if prior_dec_period else None
+prior_dec_delta  = (latest_enroll - prior_dec_enroll) if prior_dec_enroll is not None else None
+prior_dec_pct    = (prior_dec_delta / prior_dec_enroll * 100) if prior_dec_enroll else None
 
 st.caption(
-    f"Loaded **{len(periods_loaded)}** period(s): "
-    f"**{periods_loaded[0]}** – **{periods_loaded[-1]}**  ·  "
+    f"Loaded **{len(all_loaded_periods)}** period(s): "
+    f"**{all_loaded_periods[0]}** – **{all_loaded_periods[-1]}**  ·  "
     f"{len(filtered):,} rows"
     + (f"  ·  **{len(selected_parents)}** parent org(s) selected" if has_parent_org and selected_parents else "")
 )
 
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Current Period",   latest_period)
-c2.metric("Total Enrollment", f"{latest_enroll:,.0f}",
-          help="CMS suppresses county-level counts under 11 enrollees. "
-               "Those rows are estimated at 5 each and included in this total.")
+c1, c2, c3, c4, c5 = st.columns(5)
+c1.metric("Latest Period", latest_period or "—")
+c2.metric(
+    "Total Enrollment",
+    f"{latest_enroll:,.0f}",
+    help="CMS suppresses county-level counts under 11 enrollees. "
+         "Those rows are estimated at 5 each and included in this total.",
+)
 c3.metric(
-    f"Change vs {previous_period}" if previous_period else "Period Change",
+    f"MoM ({mom_period})" if mom_period else "MoM Change",
     f"{mom_delta:+,.0f}" if mom_delta is not None else "—",
     delta=f"{mom_pct:+.2f}%" if mom_pct is not None else None,
+    help=f"Change from {mom_period} to {latest_period}",
 )
-c4.metric("Periods Loaded", len(periods_loaded))
+c4.metric(
+    f"vs Prior Dec ({prior_dec_period})" if prior_dec_period else "vs Prior Dec",
+    f"{prior_dec_delta:+,.0f}" if prior_dec_delta is not None else "—",
+    delta=f"{prior_dec_pct:+.2f}%" if prior_dec_pct is not None else None,
+    help=f"Change from December of prior year ({prior_dec_label}) to {latest_period}. Load back to {prior_dec_label} to enable." if not prior_dec_period else f"Change from {prior_dec_period} to {latest_period}",
+)
+c5.metric(
+    f"YoY ({yoy_period})" if yoy_period else "YoY Change",
+    f"{yoy_delta:+,.0f}" if yoy_delta is not None else "—",
+    delta=f"{yoy_pct:+.2f}%" if yoy_pct is not None else None,
+    help=f"Change from same month prior year. Load back to {yoy_period_label} to enable." if not yoy_period else f"Change from {yoy_period} to {latest_period}",
+)
 st.divider()
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
@@ -757,40 +783,45 @@ with tabs[2]:
             )
             st.dataframe(all_c, use_container_width=True)
 
-# Tab 4 ── Period-over-Period
+# Tab 4 ── Month-over-Month
 with tabs[3]:
     group_choices = [c for c in ["PARENT_ORGANIZATION", "STATE", "CONTRACT_NAME", "CONTRACT_ID"] if c in df.columns]
     if not group_choices:
         st.info("No grouping column available.")
-    elif not previous_period:
-        st.info("Select a 'Compare to period' in the sidebar to enable period-over-period analysis.")
+    elif not mom_period:
+        st.info("Select at least 2 periods to see month-over-month changes.")
     else:
-        st.caption(
-            f"Comparing **{latest_period}** (current) vs **{previous_period}** (prior). "
-            "Change the comparison periods in the sidebar under **Compare Periods**."
-        )
-        group_choice = st.selectbox("Compare by", group_choices)
+        # Let user pick MoM or YoY comparison
+        compare_options = {f"MoM  ({mom_period} → {latest_period})": mom_period}
+        if prior_dec_period:
+            compare_options[f"vs Prior Dec  ({prior_dec_period} → {latest_period})"] = prior_dec_period
+        if yoy_period:
+            compare_options[f"YoY  ({yoy_period} → {latest_period})"] = yoy_period
+        compare_label = st.radio("Compare against", list(compare_options.keys()), horizontal=True)
+        prior_period  = compare_options[compare_label]
+
+        group_choice = st.selectbox("Group by", group_choices)
 
         curr = filtered[filtered["REPORT_PERIOD"] == latest_period].groupby(group_choice)["ENROLLMENT"].sum()
-        prev = filtered[filtered["REPORT_PERIOD"] == previous_period].groupby(group_choice)["ENROLLMENT"].sum()
-        mom  = pd.DataFrame({"CURRENT": curr, "PREVIOUS": prev}).dropna()
-        mom["CHANGE"]   = mom["CURRENT"] - mom["PREVIOUS"]
-        mom["CHANGE_%"] = (mom["CHANGE"] / mom["PREVIOUS"] * 100).round(2)
-        mom = mom.reset_index().sort_values("CHANGE", ascending=False)
+        prev = filtered[filtered["REPORT_PERIOD"] == prior_period].groupby(group_choice)["ENROLLMENT"].sum()
+        chg  = pd.DataFrame({"CURRENT": curr, "PREVIOUS": prev}).dropna()
+        chg["CHANGE"]   = chg["CURRENT"] - chg["PREVIOUS"]
+        chg["CHANGE_%"] = (chg["CHANGE"] / chg["PREVIOUS"] * 100).round(2)
+        chg = chg.reset_index().sort_values("CHANGE", ascending=False)
 
         fmt = {"PREVIOUS": "{:,.0f}", "CURRENT": "{:,.0f}", "CHANGE": "{:+,.0f}", "CHANGE_%": "{:+.2f}%"}
         cols_show = [group_choice, "PREVIOUS", "CURRENT", "CHANGE", "CHANGE_%"]
         col_a, col_b = st.columns(2)
         with col_a:
-            st.subheader(f"📈 Biggest Gainers  ({previous_period} → {latest_period})")
-            st.dataframe(mom.head(15)[cols_show].style.format(fmt), use_container_width=True)
+            st.subheader(f"📈 Biggest Gainers  ({prior_period} → {latest_period})")
+            st.dataframe(chg.head(15)[cols_show].style.format(fmt), use_container_width=True)
         with col_b:
-            st.subheader(f"📉 Biggest Decliners  ({previous_period} → {latest_period})")
-            st.dataframe(mom.tail(15)[cols_show].sort_values("CHANGE").style.format(fmt), use_container_width=True)
+            st.subheader(f"📉 Biggest Decliners  ({prior_period} → {latest_period})")
+            st.dataframe(chg.tail(15)[cols_show].sort_values("CHANGE").style.format(fmt), use_container_width=True)
 
         fig4 = px.bar(
-            mom.head(20), x=group_choice, y="CHANGE",
-            title=f"Top 20 Change by {group_choice.replace('_',' ').title()}  ({previous_period} → {latest_period})",
+            chg.head(20), x=group_choice, y="CHANGE",
+            title=f"Top 20 Change by {group_choice.replace('_',' ').title()}  ({prior_period} → {latest_period})",
             color="CHANGE", color_continuous_scale="RdYlGn", color_continuous_midpoint=0,
         )
         st.plotly_chart(fig4, use_container_width=True)
