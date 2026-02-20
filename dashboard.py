@@ -189,6 +189,8 @@ def load_plan_directory() -> pd.DataFrame:
         (c for c in df.columns if re.search(r"(PLAN|CONTRACT).*(TYPE|TYP)", c)), None
     )
 
+    # Explicitly select only the columns we need — avoids the plan directory's
+    # own ENROLLMENT column colliding with the enrollment data after the merge
     keep_cols   = [contract_col, parent_col]
     rename_dict = {contract_col: "CONTRACT_ID", parent_col: "PARENT_ORGANIZATION"}
     if type_col:
@@ -196,7 +198,7 @@ def load_plan_directory() -> pd.DataFrame:
         rename_dict[type_col] = "PLAN_TYPE_DIR"
 
     lookup = (
-        df[keep_cols]
+        df[keep_cols]   # only these columns — ENROLLMENT from plan dir is excluded
         .rename(columns=rename_dict)
         .dropna(subset=["CONTRACT_ID"])
         .drop_duplicates(subset=["CONTRACT_ID"])
@@ -275,7 +277,7 @@ def download_period(period: str, zip_url: str) -> pd.DataFrame | None:
             rename_map[col] = "STATE"
         elif "COUNTY" in col and "FIPS" not in col and "STATE" not in col and "COUNTY" not in rename_map.values():
             rename_map[col] = "COUNTY"
-        elif re.search(r"CONTRACT.*(ID|NBR|NUM)", col) and "CONTRACT_ID" not in rename_map.values():
+        elif re.search(r"CONTRACT.*(NUMBER|ID|NBR|NUM)", col) and "CONTRACT_ID" not in rename_map.values():
             rename_map[col] = "CONTRACT_ID"
         elif re.search(r"(CONTRACT|ORG).*(NAME|NM)", col) and "CONTRACT_NAME" not in rename_map.values():
             rename_map[col] = "CONTRACT_NAME"
@@ -438,6 +440,12 @@ if not plan_dir.empty and "CONTRACT_ID" in df.columns:
     plan_dir["CONTRACT_ID"] = clean_contract_id(plan_dir["CONTRACT_ID"])
 
     df = df.merge(plan_dir, on="CONTRACT_ID", how="left")
+
+    # If the plan directory had its own ENROLLMENT column, pandas renames to
+    # ENROLLMENT_x (ours) and ENROLLMENT_y (theirs) — fix that immediately
+    if "ENROLLMENT_x" in df.columns:
+        df = df.rename(columns={"ENROLLMENT_x": "ENROLLMENT"}).drop(columns=["ENROLLMENT_y"], errors="ignore")
+
     has_parent_org = "PARENT_ORGANIZATION" in df.columns and df["PARENT_ORGANIZATION"].notna().any()
 
     # Derive CONTRACT_TYPE from CONTRACT_ID first letter (works even without directory)
