@@ -18,7 +18,7 @@ st.set_page_config(
     layout="wide",
 )
 
-PARQUET_PATH = Path("data/enrollment.parquet")
+PARQUET_PATH = Path(__file__).parent / "data" / "enrollment.parquet"
 
 PARENT_ORG_CONSOLIDATION = {
     "Unitedhealthcare": "UnitedHealth Group",
@@ -70,14 +70,18 @@ CONTRACT_TYPE_MAP = {
 # ── Load data ─────────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def load_data() -> pd.DataFrame:
-    if not PARQUET_PATH.exists():
+    try:
+        if not PARQUET_PATH.exists():
+            return pd.DataFrame()
+        df = pd.read_parquet(PARQUET_PATH)
+        # Re-apply consolidation in case parquet was built before latest map
+        if "PARENT_ORGANIZATION" in df.columns:
+            title = df["PARENT_ORGANIZATION"].astype(str).str.strip().str.title()
+            df["PARENT_ORGANIZATION"] = title.map(PARENT_ORG_CONSOLIDATION).fillna(title)
+        return df
+    except Exception as e:
+        st.error(f"Failed to load data file: {e}")
         return pd.DataFrame()
-    df = pd.read_parquet(PARQUET_PATH)
-    # Re-apply consolidation in case parquet was built before latest map
-    if "PARENT_ORGANIZATION" in df.columns:
-        title = df["PARENT_ORGANIZATION"].astype(str).str.strip().str.title()
-        df["PARENT_ORGANIZATION"] = title.map(PARENT_ORG_CONSOLIDATION).fillna(title)
-    return df
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
