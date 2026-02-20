@@ -2,12 +2,14 @@ name: Update CMS MA Enrollment Data
 
 on:
   schedule:
-    - cron: '0 10 20 * *'   # Runs on the 20th of every month at 10am UTC
-  workflow_dispatch:          # Lets you trigger it manually anytime too
+    - cron: '0 10 20 * *'   # 20th of every month at 10am UTC
+  workflow_dispatch:          # Manual trigger anytime
 
 jobs:
   update-data:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write         # needed to commit the parquet back to the repo
 
     steps:
       - name: Check out repository
@@ -19,14 +21,15 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: pip install requests beautifulsoup4 pandas python-dateutil
+        run: pip install requests beautifulsoup4 pandas python-dateutil pyarrow
 
-      - name: Run enrollment script
-        run: python cms_ma_enrollment_rolling_24mo.py
+      - name: Build enrollment parquet
+        run: python build_data.py
 
-      - name: Save CSV as downloadable artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ma-enrollment-rolling-24mo
-          path: ma_enrollment_rolling_24mo_*.csv
-          retention-days: 90
+      - name: Commit data/enrollment.parquet to repo
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/enrollment.parquet
+          git diff --cached --quiet || git commit -m "chore: update enrollment data $(date +'%Y-%m')"
+          git push
