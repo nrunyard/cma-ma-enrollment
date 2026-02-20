@@ -629,23 +629,26 @@ if selected_contracts and contract_col_for_filter and contract_col_for_filter in
 filtered = df[mask].copy()
 
 # ── Comparison period selectors (sidebar, rendered now that periods_loaded is known) ──
-periods_loaded = sorted(filtered["REPORT_PERIOD"].dropna().unique())
-
-_default_current  = periods_loaded[-1]  if len(periods_loaded) >= 1 else None
-_default_previous = periods_loaded[-2]  if len(periods_loaded) >= 2 else None
+# Use the pre-filter periods_loaded so options are stable regardless of other filters
+_all_periods_for_compare = sorted(df["REPORT_PERIOD"].dropna().unique())
 
 compare_current = st.sidebar.selectbox(
     "Current period",
-    options=periods_loaded,
-    index=len(periods_loaded) - 1,
+    options=_all_periods_for_compare,
+    index=len(_all_periods_for_compare) - 1,
     help="The 'current' period shown in KPIs and Period-over-Period tab",
 )
+
+# Build prior period options — always the full list so index never goes out of bounds
+_prior_options = [p for p in _all_periods_for_compare if p != compare_current]
+_prior_default = max(0, len(_prior_options) - 1)  # safe index regardless of list length
+
 compare_previous = st.sidebar.selectbox(
     "Compare to period",
-    options=[p for p in periods_loaded if p != compare_current],
-    index=max(0, len(periods_loaded) - 2),
+    options=_prior_options,
+    index=_prior_default,
     help="The 'prior' period to compare against",
-) if len(periods_loaded) >= 2 else None
+) if _prior_options else None
 
 latest_period   = compare_current
 previous_period = compare_previous
