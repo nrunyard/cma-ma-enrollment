@@ -396,6 +396,9 @@ if not selected_periods:
     st.info("👈 Select at least one period in the sidebar to begin.")
     st.stop()
 
+st.sidebar.markdown("### Compare Periods")
+st.sidebar.caption("Choose which two periods to compare in KPIs and the Period-over-Period tab.")
+
 # ── Load enrollment data ──────────────────────────────────────────────────────
 st.title("🏥 CMS Medicare Advantage Enrollment")
 
@@ -517,63 +520,67 @@ else:
         df["CONTRACT_TYPE"] = derive_contract_type(df["CONTRACT_ID"])
 
 # ── Additional sidebar filters ────────────────────────────────────────────────
+# All filters default to [] (empty = no filter applied = show everything).
+# Streamlit multiselects natively include a search bar when typing into them.
 periods_loaded = sorted(df["REPORT_PERIOD"].dropna().unique())
 
-# Parent Organization filter — shown first, drives contract list below
+st.sidebar.markdown("---")
+st.sidebar.caption(
+    "All filters below default to **unset** (= all data shown). "
+    "Type to search within any filter."
+)
+
+# ── Parent Organization ───────────────────────────────────────────────────────
 if has_parent_org:
     all_parents = sorted(df["PARENT_ORGANIZATION"].dropna().unique())
     selected_parents = st.sidebar.multiselect(
         "🏢 Parent Organization",
         options=all_parents,
-        default=all_parents,
-        help="Filter by the top-level parent company (e.g. UnitedHealth Group, Humana)"
+        default=[],
+        placeholder="Search or select parent org(s)…",
+        help="Leave empty to include all. Type to search.",
     )
 else:
-    selected_parents = None
+    selected_parents = []
     st.sidebar.info("Parent organization data unavailable — Plan Directory could not be loaded.")
 
+# ── State(s) — scoped by parent org if one is selected ───────────────────────
 if "STATE" in df.columns:
-    # Scope state list to only states where the selected parent orgs operate
-    if has_parent_org and selected_parents:
+    if selected_parents:
         states_in_scope = sorted(
             df[df["PARENT_ORGANIZATION"].isin(selected_parents)]["STATE"]
             .dropna().unique()
         )
-        state_help = "States updated to reflect selected parent organization(s)"
     else:
         states_in_scope = sorted(df["STATE"].dropna().unique())
-        state_help = "Filter by state"
 
     selected_states = st.sidebar.multiselect(
-        "State(s)",
+        "🗺️ State(s)",
         options=states_in_scope,
-        default=states_in_scope,
-        help=state_help,
+        default=[],
+        placeholder="Search or select state(s)…",
+        help="Leave empty to include all. Narrows automatically when a parent org is selected.",
     )
-    st.sidebar.caption(f"{len(states_in_scope):,} state(s) available for selected parent org(s)")
+    st.sidebar.caption(f"{len(states_in_scope):,} state(s) available")
 else:
-    selected_states = None
+    selected_states = []
 
-# Contract Type filter — cascades from parent org selection
+# ── Contract Type — scoped by parent org if one is selected ──────────────────
 if "CONTRACT_TYPE" in df.columns:
-    if has_parent_org and selected_parents:
-        types_in_scope = sorted(
-            df[df["PARENT_ORGANIZATION"].isin(selected_parents)]["CONTRACT_TYPE"]
-            .dropna().unique()
-        )
-    else:
-        types_in_scope = sorted(df["CONTRACT_TYPE"].dropna().unique())
+    scope_df = df[df["PARENT_ORGANIZATION"].isin(selected_parents)] if selected_parents else df
+    types_in_scope = sorted(scope_df["CONTRACT_TYPE"].dropna().unique())
 
     selected_contract_types = st.sidebar.multiselect(
         "📄 Contract Type",
         options=types_in_scope,
-        default=types_in_scope,
-        help="HMO, Regional PPO, PDP, etc. — derived from contract ID prefix",
+        default=[],
+        placeholder="Search or select contract type(s)…",
+        help="Leave empty to include all. HMO, Regional PPO, PDP, etc.",
     )
 else:
-    selected_contract_types = None
+    selected_contract_types = []
 
-# Contract/Plan filter — scoped to whichever parent orgs are selected above
+# ── Contract / Plan — scoped by all filters above ────────────────────────────
 if "CONTRACT_NAME" in df.columns:
     contract_col_for_filter = "CONTRACT_NAME"
 elif "CONTRACT_ID" in df.columns:
@@ -582,49 +589,68 @@ else:
     contract_col_for_filter = None
 
 if contract_col_for_filter:
-    # If parent org filter is active, only show contracts belonging to those orgs
-    if has_parent_org and selected_parents:
-        contracts_in_scope = sorted(
-            df[df["PARENT_ORGANIZATION"].isin(selected_parents)][contract_col_for_filter]
-            .dropna().unique()
-        )
-    else:
-        contracts_in_scope = sorted(df[contract_col_for_filter].dropna().unique())
+    scope_df = df.copy()
+    if selected_parents:
+        scope_df = scope_df[scope_df["PARENT_ORGANIZATION"].isin(selected_parents)]
+    if selected_states:
+        scope_df = scope_df[scope_df["STATE"].isin(selected_states)]
+    if selected_contract_types:
+        scope_df = scope_df[scope_df["CONTRACT_TYPE"].isin(selected_contract_types)]
+
+    contracts_in_scope = sorted(scope_df[contract_col_for_filter].dropna().unique())
 
     selected_contracts = st.sidebar.multiselect(
-        "Contract / Plan",
+        "📋 Contract / Plan",
         options=contracts_in_scope,
-        default=contracts_in_scope[:20],
-        help="List updates automatically based on selected parent organizations"
+        default=[],
+        placeholder="Search or select contract(s)…",
+        help=f"Leave empty to include all. {len(contracts_in_scope):,} contracts available.",
     )
-    st.sidebar.caption(f"{len(contracts_in_scope):,} contracts available for selected parent org(s)")
+    st.sidebar.caption(f"{len(contracts_in_scope):,} contracts available")
 else:
-    selected_contracts = None
+    selected_contracts = []
 
 # ── Apply filters ─────────────────────────────────────────────────────────────
+# Empty selection on any filter = that filter is inactive (all rows pass through)
 mask = df["REPORT_PERIOD"].isin(periods_loaded)
 
-# Apply parent org filter first
-if has_parent_org and selected_parents:
+if selected_parents and has_parent_org:
     mask &= df["PARENT_ORGANIZATION"].isin(selected_parents)
 
-# Apply contract type filter
 if selected_contract_types and "CONTRACT_TYPE" in df.columns:
     mask &= df["CONTRACT_TYPE"].isin(selected_contract_types)
 
-# Apply state filter
 if selected_states and "STATE" in df.columns:
     mask &= df["STATE"].isin(selected_states)
 
-# Apply contract filter — only if a contract_col_for_filter was found
 if selected_contracts and contract_col_for_filter and contract_col_for_filter in df.columns:
     mask &= df[contract_col_for_filter].isin(selected_contracts)
 
 filtered = df[mask].copy()
 
+# ── Comparison period selectors (sidebar, rendered now that periods_loaded is known) ──
+periods_loaded = sorted(filtered["REPORT_PERIOD"].dropna().unique())
+
+_default_current  = periods_loaded[-1]  if len(periods_loaded) >= 1 else None
+_default_previous = periods_loaded[-2]  if len(periods_loaded) >= 2 else None
+
+compare_current = st.sidebar.selectbox(
+    "Current period",
+    options=periods_loaded,
+    index=len(periods_loaded) - 1,
+    help="The 'current' period shown in KPIs and Period-over-Period tab",
+)
+compare_previous = st.sidebar.selectbox(
+    "Compare to period",
+    options=[p for p in periods_loaded if p != compare_current],
+    index=max(0, len(periods_loaded) - 2),
+    help="The 'prior' period to compare against",
+) if len(periods_loaded) >= 2 else None
+
+latest_period   = compare_current
+previous_period = compare_previous
+
 # ── KPI row ───────────────────────────────────────────────────────────────────
-latest_period   = periods_loaded[-1]
-previous_period = periods_loaded[-2] if len(periods_loaded) >= 2 else None
 latest_enroll   = filtered[filtered["REPORT_PERIOD"] == latest_period]["ENROLLMENT"].sum()
 previous_enroll = (
     filtered[filtered["REPORT_PERIOD"] == previous_period]["ENROLLMENT"].sum()
@@ -641,12 +667,12 @@ st.caption(
 )
 
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("Latest Period",    latest_period)
+c1.metric("Current Period",   latest_period)
 c2.metric("Total Enrollment", f"{latest_enroll:,.0f}",
           help="CMS suppresses county-level counts under 11 enrollees. "
                "Those rows are estimated at 5 each and included in this total.")
 c3.metric(
-    "MoM Change",
+    f"Change vs {previous_period}" if previous_period else "Period Change",
     f"{mom_delta:+,.0f}" if mom_delta is not None else "—",
     delta=f"{mom_pct:+.2f}%" if mom_pct is not None else None,
 )
@@ -732,15 +758,20 @@ with tabs[2]:
             )
             st.dataframe(all_c, use_container_width=True)
 
-# Tab 4 ── MoM
+# Tab 4 ── Period-over-Period
 with tabs[3]:
     group_choices = [c for c in ["PARENT_ORGANIZATION", "STATE", "CONTRACT_NAME", "CONTRACT_ID"] if c in df.columns]
     if not group_choices:
         st.info("No grouping column available.")
     elif not previous_period:
-        st.info("Select at least 2 periods to see month-over-month changes.")
+        st.info("Select a 'Compare to period' in the sidebar to enable period-over-period analysis.")
     else:
-        group_choice = st.selectbox("Compare MoM by", group_choices)
+        st.caption(
+            f"Comparing **{latest_period}** (current) vs **{previous_period}** (prior). "
+            "Change the comparison periods in the sidebar under **Compare Periods**."
+        )
+        group_choice = st.selectbox("Compare by", group_choices)
+
         curr = filtered[filtered["REPORT_PERIOD"] == latest_period].groupby(group_choice)["ENROLLMENT"].sum()
         prev = filtered[filtered["REPORT_PERIOD"] == previous_period].groupby(group_choice)["ENROLLMENT"].sum()
         mom  = pd.DataFrame({"CURRENT": curr, "PREVIOUS": prev}).dropna()
@@ -755,12 +786,12 @@ with tabs[3]:
             st.subheader(f"📈 Biggest Gainers  ({previous_period} → {latest_period})")
             st.dataframe(mom.head(15)[cols_show].style.format(fmt), use_container_width=True)
         with col_b:
-            st.subheader("📉 Biggest Decliners")
+            st.subheader(f"📉 Biggest Decliners  ({previous_period} → {latest_period})")
             st.dataframe(mom.tail(15)[cols_show].sort_values("CHANGE").style.format(fmt), use_container_width=True)
 
         fig4 = px.bar(
             mom.head(20), x=group_choice, y="CHANGE",
-            title=f"Top 20 MoM Change by {group_choice.replace('_',' ').title()}",
+            title=f"Top 20 Change by {group_choice.replace('_',' ').title()}  ({previous_period} → {latest_period})",
             color="CHANGE", color_continuous_scale="RdYlGn", color_continuous_midpoint=0,
         )
         st.plotly_chart(fig4, use_container_width=True)
