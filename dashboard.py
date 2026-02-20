@@ -1,7 +1,8 @@
 """
 CMS MA Enrollment – Rolling 24-Month Dashboard
 ===============================================
-Pulls data live from CMS.gov on demand — no local CSV needed.
+Pulls enrollment data live from CMS.gov on demand.
+Joins MA Plan Directory to add Parent Organization filter.
 Run locally:  streamlit run dashboard.py
 Hosted on:    Streamlit Community Cloud
 """
@@ -27,7 +28,11 @@ CMS_INDEX_URL = (
     "medicare-advantagepart-d-contract-and-enrollment-data/"
     "monthly-ma-enrollment-state/county/contract"
 )
-CMS_BASE_URL  = "https://www.cms.gov"
+CMS_PLAN_DIR_URL = (
+    "https://www.cms.gov/data-research/statistics-trends-and-reports/"
+    "medicare-advantagepart-d-contract-and-enrollment-data/ma-plan-directory"
+)
+CMS_BASE_URL   = "https://www.cms.gov"
 ROLLING_MONTHS = 24
 
 HEADERS = {
@@ -41,47 +46,12 @@ SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
 
 SKIP_RE = re.compile(r"(read_?me|readme|__macosx|\.ds_store)", re.I)
-DATA_RE = re.compile(r"(scc|enrollment|enroll|ma_)", re.I)
+DATA_RE = re.compile(r"(scc|enrollment|enroll|ma_|plan_dir|directory)", re.I)
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-@st.cache_data(ttl=86400, show_spinner=False)
-def get_available_periods() -> dict:
-    """Scrape the CMS index and return {period: subpage_url}."""
-    try:
-        r = SESSION.get(CMS_INDEX_URL, timeout=30)
-        r.raise_for_status()
-    except Exception as e:
-        st.error(f"Could not reach CMS.gov: {e}")
-        return {}
-    soup  = BeautifulSoup(r.text, "html.parser")
-    links = {}
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        m = re.search(r"ma-enrollment-scc-(\d{4}-\d{2})$", href)
-        if m:
-            period = m.group(1)
-            links[period] = href if href.startswith("http") else CMS_BASE_URL + href
-    return links
-
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def get_zip_url(subpage_url: str) -> str | None:
-    try:
-        r = SESSION.get(subpage_url, timeout=30)
-        r.raise_for_status()
-    except Exception:
-        return None
-    soup = BeautifulSoup(r.text, "html.parser")
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        if href.lower().endswith(".zip"):
-            return href if href.startswith("http") else CMS_BASE_URL + href
-    return None
-
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def download_period(period: str, zip_url: str) -> pd.DataFrame | None:
+# ── Generic ZIP download helper ───────────────────────────────────────────────
+def _fetch_zip_df(zip_url: str) -> pd.DataFrame | None:
+    """Download a ZIP and return the first plausible data file as a DataFrame."""
     try:
         r = SESSION.get(zip_url, timeout=120)
         r.raise_for_status()
@@ -105,9 +75,9 @@ def download_period(period: str, zip_url: str) -> pd.DataFrame | None:
                 ]
             if not candidates:
                 return None
-            preferred  = [n for n in candidates if DATA_RE.search(n)]
-            data_name  = preferred[0] if preferred else candidates[0]
-            raw_bytes  = zf.read(data_name)
+            preferred = [n for n in candidates if DATA_RE.search(n)]
+            data_name = preferred[0] if preferred else candidates[0]
+            raw_bytes = zf.read(data_name)
     except zipfile.BadZipFile:
         return None
 
@@ -115,42 +85,141 @@ def download_period(period: str, zip_url: str) -> pd.DataFrame | None:
     for enc in ("utf-8-sig", "latin-1", "cp1252"):
         for sep in (",", "\t", "|"):
             try:
-                candidate = pd.read_csv(
+                cand = pd.read_csv(
                     io.BytesIO(raw_bytes), dtype=str,
                     encoding=enc, sep=sep, low_memory=False,
                 )
-                if candidate.shape[1] >= 2:
-                    df = candidate
+                if cand.shape[1] >= 2:
+                    df = cand
                     break
             except Exception:
                 continue
         if df is not None:
             break
 
+    if df is not None:
+        df.columns = [c.strip().upper().replace(" ", "_") for c in df.columns]
+    return df
+
+
+def _get_zip_url_from_page(page_url: str) -> str | None:
+    """Scrape a CMS page and return the first ZIP link found."""
+    try:
+        r = SESSION.get(page_url, timeout=30)
+        r.raise_for_status()
+    except Exception:
+        return None
+    soup = BeautifulSoup(r.text, "html.parser")
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if href.lower().endswith(".zip"):
+            return href if href.startswith("http") else CMS_BASE_URL + href
+    return None
+
+
+# ── MA Plan Directory → CONTRACT_ID : PARENT_ORGANIZATION lookup ─────────────
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_plan_directory() -> pd.DataFrame:
+    """
+    Downloads the MA Plan Directory and returns a DataFrame with at minimum:
+        CONTRACT_ID  |  PARENT_ORGANIZATION
+    Falls back gracefully if the file can't be fetched.
+    """
+    zip_url = _get_zip_url_from_page(CMS_PLAN_DIR_URL)
+    if not zip_url:
+        return pd.DataFrame(columns=["CONTRACT_ID", "PARENT_ORGANIZATION"])
+
+    df = _fetch_zip_df(zip_url)
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["CONTRACT_ID", "PARENT_ORGANIZATION"])
+
+    # Find the contract ID column (first column starting with H/R/S + 4 digits)
+    contract_col = next(
+        (c for c in df.columns if re.search(r"CONTRACT.*(ID|NBR|NUM|NO)", c)), None
+    )
+    if contract_col is None:
+        # Try to detect by value pattern  e.g. H1234
+        for c in df.columns:
+            sample = df[c].dropna().head(20)
+            if sample.str.match(r"^[A-Z]\d{4}$").sum() >= 5:
+                contract_col = c
+                break
+
+    # Find the parent org column
+    parent_col = next(
+        (c for c in df.columns if "PARENT" in c and "ORG" in c), None
+    )
+    if parent_col is None:
+        parent_col = next(
+            (c for c in df.columns if "PARENT" in c), None
+        )
+
+    if contract_col is None or parent_col is None:
+        return pd.DataFrame(columns=["CONTRACT_ID", "PARENT_ORGANIZATION"])
+
+    lookup = (
+        df[[contract_col, parent_col]]
+        .rename(columns={contract_col: "CONTRACT_ID", parent_col: "PARENT_ORGANIZATION"})
+        .dropna(subset=["CONTRACT_ID"])
+        .drop_duplicates(subset=["CONTRACT_ID"])
+    )
+    lookup["CONTRACT_ID"]       = lookup["CONTRACT_ID"].str.strip().str.upper()
+    lookup["PARENT_ORGANIZATION"] = lookup["PARENT_ORGANIZATION"].str.strip().str.title()
+    return lookup
+
+
+# ── Enrollment scraping helpers ───────────────────────────────────────────────
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_available_periods() -> dict:
+    try:
+        r = SESSION.get(CMS_INDEX_URL, timeout=30)
+        r.raise_for_status()
+    except Exception as e:
+        st.error(f"Could not reach CMS.gov: {e}")
+        return {}
+    soup  = BeautifulSoup(r.text, "html.parser")
+    links = {}
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        m = re.search(r"ma-enrollment-scc-(\d{4}-\d{2})$", href)
+        if m:
+            period = m.group(1)
+            links[period] = href if href.startswith("http") else CMS_BASE_URL + href
+    return links
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_zip_url(subpage_url: str) -> str | None:
+    return _get_zip_url_from_page(subpage_url)
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def download_period(period: str, zip_url: str) -> pd.DataFrame | None:
+    df = _fetch_zip_df(zip_url)
     if df is None:
         return None
 
-    df.columns = [c.strip().upper().replace(" ", "_") for c in df.columns]
     df.insert(0, "REPORT_PERIOD", period)
 
     # Standardise enrollment column
     enroll_col = next(
-        (c for c in df.columns if any(k in c for k in ("ENROLL", "MEMBER", "BENE"))
+        (c for c in df.columns
+         if any(k in c for k in ("ENROLL", "MEMBER", "BENE"))
          and "REPORT" not in c),
         None,
     )
     if enroll_col:
         df = df.rename(columns={enroll_col: "ENROLLMENT"})
-    df["ENROLLMENT"] = pd.to_numeric(df.get("ENROLLMENT", pd.Series()), errors="coerce")
+    df["ENROLLMENT"] = pd.to_numeric(df.get("ENROLLMENT", pd.Series(dtype=float)), errors="coerce")
 
-    # Standardise common column names
+    # Standardise other column names
     rename_map = {}
     for col in df.columns:
         if col in ("ENROLLMENT", "REPORT_PERIOD"):
             continue
-        if "STATE" in col and "FIPS" not in col and col not in rename_map.values():
+        if "STATE" in col and "FIPS" not in col and "STATE" not in rename_map.values():
             rename_map[col] = "STATE"
-        elif "COUNTY" in col and "FIPS" not in col and "STATE" not in col and col not in rename_map.values():
+        elif "COUNTY" in col and "FIPS" not in col and "STATE" not in col and "COUNTY" not in rename_map.values():
             rename_map[col] = "COUNTY"
         elif re.search(r"CONTRACT.*(ID|NBR|NUM)", col) and "CONTRACT_ID" not in rename_map.values():
             rename_map[col] = "CONTRACT_ID"
@@ -162,7 +231,6 @@ def download_period(period: str, zip_url: str) -> pd.DataFrame | None:
 
 
 def normalise(df: pd.DataFrame) -> pd.DataFrame:
-    """Keep only the columns we actually use to reduce memory."""
     keep = ["REPORT_PERIOD", "ENROLLMENT"]
     for c in ["STATE", "COUNTY", "CONTRACT_ID", "CONTRACT_NAME"]:
         if c in df.columns:
@@ -184,8 +252,8 @@ if not all_periods_map:
     st.error("Could not retrieve period list from CMS.gov. Please refresh.")
     st.stop()
 
-all_periods = sorted(all_periods_map.keys(), reverse=True)[:ROLLING_MONTHS]
-all_periods_sorted = sorted(all_periods)   # oldest → newest for display
+all_periods        = sorted(all_periods_map.keys(), reverse=True)[:ROLLING_MONTHS]
+all_periods_sorted = sorted(all_periods)
 
 st.sidebar.markdown("### Select Periods")
 st.sidebar.caption("Start with 3–6 months for fastest load.")
@@ -193,19 +261,19 @@ st.sidebar.caption("Start with 3–6 months for fastest load.")
 selected_periods = st.sidebar.multiselect(
     "Report Period(s)",
     options=all_periods_sorted,
-    default=all_periods_sorted[-6:],   # default: most recent 6 months
+    default=all_periods_sorted[-6:],
 )
 
 if not selected_periods:
     st.info("👈 Select at least one period in the sidebar to begin.")
     st.stop()
 
-# ── Load selected periods ─────────────────────────────────────────────────────
+# ── Load enrollment data ──────────────────────────────────────────────────────
 st.title("🏥 CMS Medicare Advantage Enrollment")
 
 frames = []
 failed = []
-progress_bar = st.progress(0, text="Loading data…")
+progress_bar = st.progress(0, text="Loading enrollment data…")
 
 for i, period in enumerate(sorted(selected_periods)):
     progress_bar.progress((i + 1) / len(selected_periods), text=f"Loading {period}…")
@@ -223,15 +291,39 @@ progress_bar.empty()
 
 if failed:
     st.warning(f"Could not load data for: {', '.join(failed)}")
-
 if not frames:
     st.error("No data could be loaded. Please try different periods.")
     st.stop()
 
 df = pd.concat(frames, ignore_index=True)
 
+# ── Load & join Plan Directory for Parent Organization ────────────────────────
+with st.spinner("Loading MA Plan Directory for parent organization data…"):
+    plan_dir = load_plan_directory()
+
+if not plan_dir.empty and "CONTRACT_ID" in df.columns:
+    # Normalise contract IDs before joining
+    df["CONTRACT_ID"] = df["CONTRACT_ID"].str.strip().str.upper()
+    df = df.merge(plan_dir, on="CONTRACT_ID", how="left")
+    has_parent_org = "PARENT_ORGANIZATION" in df.columns and df["PARENT_ORGANIZATION"].notna().any()
+else:
+    has_parent_org = False
+
 # ── Additional sidebar filters ────────────────────────────────────────────────
 periods_loaded = sorted(df["REPORT_PERIOD"].dropna().unique())
+
+# Parent Organization filter (new — shown first for prominence)
+if has_parent_org:
+    all_parents = sorted(df["PARENT_ORGANIZATION"].dropna().unique())
+    selected_parents = st.sidebar.multiselect(
+        "🏢 Parent Organization",
+        options=all_parents,
+        default=all_parents,
+        help="Filter by the top-level parent company (e.g. UnitedHealth Group, Humana)"
+    )
+else:
+    selected_parents = None
+    st.sidebar.info("Parent organization data unavailable — Plan Directory could not be loaded.")
 
 if "STATE" in df.columns:
     states = sorted(df["STATE"].dropna().unique())
@@ -249,6 +341,8 @@ else:
 
 # ── Apply filters ─────────────────────────────────────────────────────────────
 mask = df["REPORT_PERIOD"].isin(periods_loaded)
+if selected_parents and has_parent_org:
+    mask &= df["PARENT_ORGANIZATION"].isin(selected_parents)
 if selected_states and "STATE" in df.columns:
     mask &= df["STATE"].isin(selected_states)
 if selected_contracts and "CONTRACT_NAME" in df.columns:
@@ -270,6 +364,7 @@ st.caption(
     f"Loaded **{len(periods_loaded)}** period(s): "
     f"**{periods_loaded[0]}** – **{periods_loaded[-1]}**  ·  "
     f"{len(filtered):,} rows"
+    + (f"  ·  **{len(selected_parents)}** parent org(s) selected" if has_parent_org and selected_parents else "")
 )
 
 c1, c2, c3, c4 = st.columns(4)
@@ -284,15 +379,15 @@ c4.metric("Periods Loaded", len(periods_loaded))
 st.divider()
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4 = st.tabs([
-    "📈 Enrollment Trend",
-    "🗺️ By State / County",
-    "📋 By Contract / Plan",
-    "🔄 Month-over-Month",
-])
+tab_labels = ["📈 Enrollment Trend", "🗺️ By State / County",
+              "📋 By Contract / Plan", "🔄 Month-over-Month"]
+if has_parent_org:
+    tab_labels.append("🏢 By Parent Organization")
+
+tabs = st.tabs(tab_labels)
 
 # Tab 1 ── Trend
-with tab1:
+with tabs[0]:
     trend = (
         filtered.groupby("REPORT_PERIOD")["ENROLLMENT"]
         .sum().reset_index().sort_values("REPORT_PERIOD")
@@ -308,13 +403,11 @@ with tab1:
         st.dataframe(trend, use_container_width=True)
 
 # Tab 2 ── State / County
-with tab2:
+with tabs[1]:
     if "STATE" not in df.columns:
         st.info("No STATE column found in this dataset.")
     else:
-        options = ["STATE"]
-        if "COUNTY" in df.columns:
-            options.append("COUNTY")
+        options = ["STATE"] + (["COUNTY"] if "COUNTY" in df.columns else [])
         geo_col = st.radio("Group by", options, horizontal=True)
         geo = (
             filtered[filtered["REPORT_PERIOD"] == latest_period]
@@ -336,7 +429,7 @@ with tab2:
             st.dataframe(full_geo, use_container_width=True)
 
 # Tab 3 ── Contract / Plan
-with tab3:
+with tabs[2]:
     contract_col = next(
         (c for c in ["CONTRACT_NAME", "CONTRACT_ID"] if c in df.columns), None
     )
@@ -365,12 +458,12 @@ with tab3:
             st.dataframe(all_c, use_container_width=True)
 
 # Tab 4 ── MoM
-with tab4:
-    group_choices = [c for c in ["STATE", "CONTRACT_NAME", "CONTRACT_ID"] if c in df.columns]
+with tabs[3]:
+    group_choices = [c for c in ["PARENT_ORGANIZATION", "STATE", "CONTRACT_NAME", "CONTRACT_ID"] if c in df.columns]
     if not group_choices:
         st.info("No grouping column available.")
     elif not previous_period:
-        st.info("Select at least 2 periods in the sidebar to see month-over-month changes.")
+        st.info("Select at least 2 periods to see month-over-month changes.")
     else:
         group_choice = st.selectbox("Compare MoM by", group_choices)
         curr = filtered[filtered["REPORT_PERIOD"] == latest_period].groupby(group_choice)["ENROLLMENT"].sum()
@@ -380,10 +473,7 @@ with tab4:
         mom["CHANGE_%"] = (mom["CHANGE"] / mom["PREVIOUS"] * 100).round(2)
         mom = mom.reset_index().sort_values("CHANGE", ascending=False)
 
-        fmt = {
-            "PREVIOUS": "{:,.0f}", "CURRENT": "{:,.0f}",
-            "CHANGE": "{:+,.0f}", "CHANGE_%": "{:+.2f}%",
-        }
+        fmt = {"PREVIOUS": "{:,.0f}", "CURRENT": "{:,.0f}", "CHANGE": "{:+,.0f}", "CHANGE_%": "{:+.2f}%"}
         cols_show = [group_choice, "PREVIOUS", "CURRENT", "CHANGE", "CHANGE_%"]
         col_a, col_b = st.columns(2)
         with col_a:
@@ -400,10 +490,68 @@ with tab4:
         )
         st.plotly_chart(fig4, use_container_width=True)
 
+# Tab 5 ── By Parent Organization (only shown if data available)
+if has_parent_org:
+    with tabs[4]:
+        st.subheader(f"Enrollment by Parent Organization — {latest_period}")
+
+        parent_enroll = (
+            filtered[filtered["REPORT_PERIOD"] == latest_period]
+            .groupby("PARENT_ORGANIZATION")["ENROLLMENT"].sum()
+            .reset_index().sort_values("ENROLLMENT", ascending=False)
+        )
+
+        top_n_p = st.slider("Show top N parent orgs", 5, 30, 15, key="parent_slider")
+
+        fig5 = px.bar(
+            parent_enroll.head(top_n_p),
+            x="ENROLLMENT", y="PARENT_ORGANIZATION", orientation="h",
+            title=f"Top {top_n_p} Parent Organizations by Enrollment — {latest_period}",
+            color="ENROLLMENT", color_continuous_scale="Purples",
+        )
+        fig5.update_layout(yaxis={"categoryorder": "total ascending"})
+        st.plotly_chart(fig5, use_container_width=True)
+
+        # Trend by parent org over time
+        if len(periods_loaded) > 1:
+            st.subheader("Enrollment Trend by Parent Organization")
+            top_parents_list = parent_enroll.head(10)["PARENT_ORGANIZATION"].tolist()
+            trend_parent = (
+                filtered[filtered["PARENT_ORGANIZATION"].isin(top_parents_list)]
+                .groupby(["REPORT_PERIOD", "PARENT_ORGANIZATION"])["ENROLLMENT"]
+                .sum().reset_index()
+            )
+            fig6 = px.line(
+                trend_parent, x="REPORT_PERIOD", y="ENROLLMENT",
+                color="PARENT_ORGANIZATION", markers=True,
+                title="Top 10 Parent Organizations — Enrollment Over Time",
+                labels={"REPORT_PERIOD": "Period", "ENROLLMENT": "Enrollees",
+                        "PARENT_ORGANIZATION": "Parent Org"},
+            )
+            fig6.update_layout(hovermode="x unified")
+            st.plotly_chart(fig6, use_container_width=True)
+
+        # Market share pie
+        fig7 = px.pie(
+            parent_enroll.head(10),
+            values="ENROLLMENT", names="PARENT_ORGANIZATION",
+            title=f"Market Share — Top 10 Parent Organizations ({latest_period})",
+        )
+        fig7.update_traces(textposition="inside", textinfo="percent+label")
+        st.plotly_chart(fig7, use_container_width=True)
+
+        with st.expander("View full parent organization table"):
+            st.dataframe(parent_enroll, use_container_width=True)
+
 st.divider()
 st.caption(
-    "Data source: [CMS Monthly MA Enrollment by State/County/Contract]"
+    "Data sources: "
+    "[CMS Monthly MA Enrollment by State/County/Contract]"
     "(https://www.cms.gov/data-research/statistics-trends-and-reports/"
     "medicare-advantagepart-d-contract-and-enrollment-data/"
     "monthly-ma-enrollment-state/county/contract)"
+    " · "
+    "[CMS MA Plan Directory]"
+    "(https://www.cms.gov/data-research/statistics-trends-and-reports/"
+    "medicare-advantagepart-d-contract-and-enrollment-data/ma-plan-directory)"
 )
