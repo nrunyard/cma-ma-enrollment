@@ -176,6 +176,8 @@ def load_plan_directory() -> pd.DataFrame:
     )
     lookup["CONTRACT_ID"]         = lookup["CONTRACT_ID"].str.strip().str.upper()
     lookup["PARENT_ORGANIZATION"] = lookup["PARENT_ORGANIZATION"].str.strip().str.title()
+    # Consolidate fragmented entity names into canonical parent org names
+    lookup["PARENT_ORGANIZATION"] = consolidate_parent_org(lookup["PARENT_ORGANIZATION"])
     if "PLAN_TYPE_DIR" in lookup.columns:
         lookup["PLAN_TYPE_DIR"] = lookup["PLAN_TYPE_DIR"].str.strip().str.title()
     return lookup
@@ -255,6 +257,64 @@ def download_period(period: str, zip_url: str) -> pd.DataFrame | None:
 
     return df
 
+
+# ── Parent org consolidation map ─────────────────────────────────────────────
+# CMS Plan Directory fragments large insurers across multiple legal entity names.
+# This map collapses known variants into a single canonical parent org name so
+# that market share totals match industry-reported figures.
+PARENT_ORG_CONSOLIDATION = {
+    # UnitedHealth Group
+    "Unitedhealthcare":                         "UnitedHealth Group",
+    "Unitedhealth Group":                       "UnitedHealth Group",
+    "United Healthcare":                        "UnitedHealth Group",
+    "United Health Care":                       "UnitedHealth Group",
+    "Aarp/Unitedhealthcare":                    "UnitedHealth Group",
+    "Ovations":                                 "UnitedHealth Group",
+    "Pacificare":                               "UnitedHealth Group",
+    "Sierra Health And Life":                   "UnitedHealth Group",
+    "Americhoice":                              "UnitedHealth Group",
+    # CVS / Aetna
+    "Cvs Health Corporation":                   "CVS Health / Aetna",
+    "Aetna":                                    "CVS Health / Aetna",
+    "Cvs Health":                               "CVS Health / Aetna",
+    "Aetna Inc.":                               "CVS Health / Aetna",
+    # Humana
+    "Humana":                                   "Humana",
+    "Humana Inc.":                              "Humana",
+    "Humana Inc":                               "Humana",
+    # Elevance (Anthem/BCBS)
+    "Elevance Health":                          "Elevance Health",
+    "Anthem":                                   "Elevance Health",
+    "Anthem, Inc.":                             "Elevance Health",
+    "Anthem Inc":                               "Elevance Health",
+    # Centene
+    "Centene Corporation":                      "Centene",
+    "Centene":                                  "Centene",
+    "Wellcare":                                 "Centene",
+    "Wellcare Health Plans":                    "Centene",
+    # Kaiser
+    "Kaiser Foundation Health Plan":            "Kaiser Permanente",
+    "Kaiser Foundation Health Plan, Inc":       "Kaiser Permanente",
+    "Kaiser":                                   "Kaiser Permanente",
+    # Cigna
+    "Cigna":                                    "Cigna",
+    "Cigna Corporation":                        "Cigna",
+    "Cigna Healthcare":                         "Cigna",
+    "Cigna-Healthspring":                       "Cigna",
+    # Molina
+    "Molina Healthcare":                        "Molina Healthcare",
+    "Molina Healthcare, Inc":                   "Molina Healthcare",
+    # SCAN
+    "Scan Health Plan":                         "SCAN Health Plan",
+    # UPMC
+    "Upmc Health Plan":                         "UPMC Health Plan",
+}
+
+def consolidate_parent_org(series: pd.Series) -> pd.Series:
+    """Map CMS directory parent org names to canonical consolidated names."""
+    # Title-case to normalise, then look up in map; keep original if not found
+    title = series.str.strip().str.title()
+    return title.map(PARENT_ORG_CONSOLIDATION).fillna(title)
 
 # Contract type label map derived from the first letter of CONTRACT_ID
 CONTRACT_TYPE_MAP = {
@@ -394,6 +454,17 @@ if not plan_dir.empty and "CONTRACT_ID" in df.columns:
             enroll_sample = df["CONTRACT_ID"].dropna().head(10).tolist()
             st.markdown(f"**Sample IDs from plan directory:** `{dir_sample}`")
             st.markdown(f"**Sample IDs from enrollment data:** `{enroll_sample}`")
+
+        st.markdown("**Top 10 parent orgs by enrollment (post-consolidation):**")
+        top_orgs = (
+            df[df["PARENT_ORGANIZATION"].notna()]
+            .groupby("PARENT_ORGANIZATION")["ENROLLMENT"].sum()
+            .sort_values(ascending=False).head(10)
+            .reset_index()
+        )
+        top_orgs.columns = ["Parent Organization", "Total Enrollment"]
+        top_orgs["Total Enrollment"] = top_orgs["Total Enrollment"].apply(lambda x: f"{x:,.0f}")
+        st.dataframe(top_orgs, use_container_width=True)
 else:
     has_parent_org = False
     # Still derive contract type from CONTRACT_ID even without the directory
