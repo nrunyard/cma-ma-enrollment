@@ -2,7 +2,7 @@ name: Update CMS MA Enrollment Data
 
 on:
   schedule:
-    - cron: '0 10 15 * *'   # Runs on the 15th of every month at 10am UTC
+    - cron: '0 10 20 * *'   # Runs on the 20th of every month at 10am UTC
   workflow_dispatch:          # Lets you trigger it manually anytime too
 
 jobs:
