@@ -655,19 +655,40 @@ prior_dec_label = _prior_dec(latest_period) if latest_period else None
 prior_dec_period = prior_dec_label if prior_dec_label in all_loaded_periods else None
 
 # ── KPI row ───────────────────────────────────────────────────────────────────
-latest_enroll = filtered[filtered["REPORT_PERIOD"] == latest_period]["ENROLLMENT"].sum() if latest_period else 0
+# Apply all sidebar filters EXCEPT the period filter so we can freely query
+# any period (including ones not in selected_periods) for comparisons.
+# This prevents crashes when a filter like State=AZ has no data in a prior period.
+def _filtered_enroll(period):
+    """Sum enrollment for a period with all active filters applied. Returns None if no data."""
+    if not period:
+        return None
+    mask = df["REPORT_PERIOD"] == period
+    if selected_parents and has_parent_org:
+        mask &= df["PARENT_ORGANIZATION"].isin(selected_parents)
+    if selected_contract_types and "CONTRACT_TYPE" in df.columns:
+        mask &= df["CONTRACT_TYPE"].isin(selected_contract_types)
+    if selected_states and "STATE" in df.columns:
+        mask &= df["STATE"].isin(selected_states)
+    if selected_contracts and contract_col_for_filter and contract_col_for_filter in df.columns:
+        mask &= df[contract_col_for_filter].isin(selected_contracts)
+    total = df[mask]["ENROLLMENT"].sum()
+    return total if total > 0 else None
 
-mom_enroll = filtered[filtered["REPORT_PERIOD"] == mom_period]["ENROLLMENT"].sum() if mom_period else None
-mom_delta  = (latest_enroll - mom_enroll) if mom_enroll is not None else None
-mom_pct    = (mom_delta / mom_enroll * 100) if mom_enroll else None
+def _delta(current, prior):
+    if current is None or prior is None:
+        return None, None
+    delta = current - prior
+    pct   = (delta / prior * 100) if prior != 0 else None
+    return delta, pct
 
-yoy_enroll = filtered[filtered["REPORT_PERIOD"] == yoy_period]["ENROLLMENT"].sum() if yoy_period else None
-yoy_delta  = (latest_enroll - yoy_enroll) if yoy_enroll is not None else None
-yoy_pct    = (yoy_delta / yoy_enroll * 100) if yoy_enroll else None
+latest_enroll    = _filtered_enroll(latest_period) or 0
+mom_enroll       = _filtered_enroll(mom_period)
+yoy_enroll       = _filtered_enroll(yoy_period)
+prior_dec_enroll = _filtered_enroll(prior_dec_period)
 
-prior_dec_enroll = filtered[filtered["REPORT_PERIOD"] == prior_dec_period]["ENROLLMENT"].sum() if prior_dec_period else None
-prior_dec_delta  = (latest_enroll - prior_dec_enroll) if prior_dec_enroll is not None else None
-prior_dec_pct    = (prior_dec_delta / prior_dec_enroll * 100) if prior_dec_enroll else None
+mom_delta,       mom_pct       = _delta(latest_enroll, mom_enroll)
+yoy_delta,       yoy_pct       = _delta(latest_enroll, yoy_enroll)
+prior_dec_delta, prior_dec_pct = _delta(latest_enroll, prior_dec_enroll)
 
 st.caption(
     f"Loaded **{len(all_loaded_periods)}** period(s): "
