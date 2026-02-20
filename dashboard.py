@@ -802,29 +802,53 @@ with tabs[3]:
 
         group_choice = st.selectbox("Group by", group_choices)
 
-        curr = filtered[filtered["REPORT_PERIOD"] == latest_period].groupby(group_choice)["ENROLLMENT"].sum()
-        prev = filtered[filtered["REPORT_PERIOD"] == prior_period].groupby(group_choice)["ENROLLMENT"].sum()
-        chg  = pd.DataFrame({"CURRENT": curr, "PREVIOUS": prev}).dropna()
-        chg["CHANGE"]   = chg["CURRENT"] - chg["PREVIOUS"]
-        chg["CHANGE_%"] = (chg["CHANGE"] / chg["PREVIOUS"] * 100).round(2)
-        chg = chg.reset_index().sort_values("CHANGE", ascending=False)
+        # Always apply the same non-period filters to both periods so the
+        # comparison is apples-to-apples even when sidebar filters are active
+        non_period_mask = pd.Series(True, index=df.index)
+        if selected_parents and has_parent_org:
+            non_period_mask &= df["PARENT_ORGANIZATION"].isin(selected_parents)
+        if selected_contract_types and "CONTRACT_TYPE" in df.columns:
+            non_period_mask &= df["CONTRACT_TYPE"].isin(selected_contract_types)
+        if selected_states and "STATE" in df.columns:
+            non_period_mask &= df["STATE"].isin(selected_states)
+        if selected_contracts and contract_col_for_filter and contract_col_for_filter in df.columns:
+            non_period_mask &= df[contract_col_for_filter].isin(selected_contracts)
 
-        fmt = {"PREVIOUS": "{:,.0f}", "CURRENT": "{:,.0f}", "CHANGE": "{:+,.0f}", "CHANGE_%": "{:+.2f}%"}
-        cols_show = [group_choice, "PREVIOUS", "CURRENT", "CHANGE", "CHANGE_%"]
-        col_a, col_b = st.columns(2)
-        with col_a:
-            st.subheader(f"📈 Biggest Gainers  ({prior_period} → {latest_period})")
-            st.dataframe(chg.head(15)[cols_show].style.format(fmt), use_container_width=True)
-        with col_b:
-            st.subheader(f"📉 Biggest Decliners  ({prior_period} → {latest_period})")
-            st.dataframe(chg.tail(15)[cols_show].sort_values("CHANGE").style.format(fmt), use_container_width=True)
+        curr_df = df[non_period_mask & (df["REPORT_PERIOD"] == latest_period)]
+        prev_df = df[non_period_mask & (df["REPORT_PERIOD"] == prior_period)]
 
-        fig4 = px.bar(
-            chg.head(20), x=group_choice, y="CHANGE",
-            title=f"Top 20 Change by {group_choice.replace('_',' ').title()}  ({prior_period} → {latest_period})",
-            color="CHANGE", color_continuous_scale="RdYlGn", color_continuous_midpoint=0,
-        )
-        st.plotly_chart(fig4, use_container_width=True)
+        if prev_df.empty:
+            st.warning(
+                f"No data found for **{prior_period}**. "
+                f"Make sure you've selected **{prior_period}** in the Report Period(s) selector above."
+            )
+        else:
+            curr = curr_df.groupby(group_choice)["ENROLLMENT"].sum()
+            prev = prev_df.groupby(group_choice)["ENROLLMENT"].sum()
+            chg  = pd.DataFrame({"CURRENT": curr, "PREVIOUS": prev}).dropna()
+            chg["CHANGE"]   = chg["CURRENT"] - chg["PREVIOUS"]
+            chg["CHANGE_%"] = (chg["CHANGE"] / chg["PREVIOUS"] * 100).round(2)
+            chg = chg.reset_index().sort_values("CHANGE", ascending=False)
+
+            if chg.empty:
+                st.info("No overlapping records found between the two periods for the current filters.")
+            else:
+                fmt = {"PREVIOUS": "{:,.0f}", "CURRENT": "{:,.0f}", "CHANGE": "{:+,.0f}", "CHANGE_%": "{:+.2f}%"}
+                cols_show = [group_choice, "PREVIOUS", "CURRENT", "CHANGE", "CHANGE_%"]
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    st.subheader(f"📈 Biggest Gainers  ({prior_period} → {latest_period})")
+                    st.dataframe(chg.head(15)[cols_show].style.format(fmt), use_container_width=True)
+                with col_b:
+                    st.subheader(f"📉 Biggest Decliners  ({prior_period} → {latest_period})")
+                    st.dataframe(chg.tail(15)[cols_show].sort_values("CHANGE").style.format(fmt), use_container_width=True)
+
+                fig4 = px.bar(
+                    chg.head(20), x=group_choice, y="CHANGE",
+                    title=f"Top 20 Change by {group_choice.replace('_',' ').title()}  ({prior_period} → {latest_period})",
+                    color="CHANGE", color_continuous_scale="RdYlGn", color_continuous_midpoint=0,
+                )
+                st.plotly_chart(fig4, use_container_width=True)
 
 # Tab 5 ── By Parent Organization (only shown if data available)
 if has_parent_org:
