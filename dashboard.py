@@ -301,18 +301,58 @@ df = pd.concat(frames, ignore_index=True)
 with st.spinner("Loading MA Plan Directory for parent organization data…"):
     plan_dir = load_plan_directory()
 
+def clean_contract_id(series: pd.Series) -> pd.Series:
+    """Aggressively normalise contract IDs: strip, upper, remove non-alphanumeric."""
+    return series.astype(str).str.strip().str.upper().str.replace(r"[^A-Z0-9]", "", regex=True)
+
 if not plan_dir.empty and "CONTRACT_ID" in df.columns:
-    # Normalise contract IDs before joining
-    df["CONTRACT_ID"] = df["CONTRACT_ID"].str.strip().str.upper()
+    # Clean both sides before joining
+    df["CONTRACT_ID"]       = clean_contract_id(df["CONTRACT_ID"])
+    plan_dir                = plan_dir.copy()
+    plan_dir["CONTRACT_ID"] = clean_contract_id(plan_dir["CONTRACT_ID"])
+
     df = df.merge(plan_dir, on="CONTRACT_ID", how="left")
     has_parent_org = "PARENT_ORGANIZATION" in df.columns and df["PARENT_ORGANIZATION"].notna().any()
+
+    # ── Debug expander ────────────────────────────────────────────────────────
+    total_rows     = len(df)
+    matched_rows   = df["PARENT_ORGANIZATION"].notna().sum()
+    unmatched_rows = total_rows - matched_rows
+    match_pct      = matched_rows / total_rows * 100 if total_rows > 0 else 0
+
+    with st.expander(
+        f"🔍 Parent Org Join Diagnostics  "
+        f"({matched_rows:,} / {total_rows:,} rows matched  —  {match_pct:.1f}%)",
+        expanded=(match_pct < 50),
+    ):
+        st.markdown(
+            f"- **Enrollment rows:** {total_rows:,}\n"
+            f"- **Matched to a parent org:** {matched_rows:,} ({match_pct:.1f}%)\n"
+            f"- **Unmatched (no parent org):** {unmatched_rows:,}\n"
+            f"- **Unique contract IDs in enrollment data:** "
+            f"{df['CONTRACT_ID'].nunique():,}\n"
+            f"- **Unique contract IDs in plan directory:** "
+            f"{plan_dir['CONTRACT_ID'].nunique():,}"
+        )
+        if unmatched_rows > 0:
+            unmatched_ids = (
+                df[df["PARENT_ORGANIZATION"].isna()]["CONTRACT_ID"]
+                .value_counts().head(20).reset_index()
+            )
+            unmatched_ids.columns = ["CONTRACT_ID_IN_ENROLLMENT", "ROW_COUNT"]
+            st.markdown("**Top unmatched contract IDs (in enrollment but not in directory):**")
+            st.dataframe(unmatched_ids, use_container_width=True)
+            dir_sample    = plan_dir["CONTRACT_ID"].dropna().head(10).tolist()
+            enroll_sample = df["CONTRACT_ID"].dropna().head(10).tolist()
+            st.markdown(f"**Sample IDs from plan directory:** `{dir_sample}`")
+            st.markdown(f"**Sample IDs from enrollment data:** `{enroll_sample}`")
 else:
     has_parent_org = False
 
 # ── Additional sidebar filters ────────────────────────────────────────────────
 periods_loaded = sorted(df["REPORT_PERIOD"].dropna().unique())
 
-# Parent Organization filter (new — shown first for prominence)
+# Parent Organization filter — shown first, drives contract list below
 if has_parent_org:
     all_parents = sorted(df["PARENT_ORGANIZATION"].dropna().unique())
     selected_parents = st.sidebar.multiselect(
@@ -326,27 +366,70 @@ else:
     st.sidebar.info("Parent organization data unavailable — Plan Directory could not be loaded.")
 
 if "STATE" in df.columns:
-    states = sorted(df["STATE"].dropna().unique())
-    selected_states = st.sidebar.multiselect("State(s)", states, default=states)
+    # Scope state list to only states where the selected parent orgs operate
+    if has_parent_org and selected_parents:
+        states_in_scope = sorted(
+            df[df["PARENT_ORGANIZATION"].isin(selected_parents)]["STATE"]
+            .dropna().unique()
+        )
+        state_help = "States updated to reflect selected parent organization(s)"
+    else:
+        states_in_scope = sorted(df["STATE"].dropna().unique())
+        state_help = "Filter by state"
+
+    selected_states = st.sidebar.multiselect(
+        "State(s)",
+        options=states_in_scope,
+        default=states_in_scope,
+        help=state_help,
+    )
+    st.sidebar.caption(f"{len(states_in_scope):,} state(s) available for selected parent org(s)")
 else:
     selected_states = None
 
+# Contract/Plan filter — scoped to whichever parent orgs are selected above
 if "CONTRACT_NAME" in df.columns:
-    contracts = sorted(df["CONTRACT_NAME"].dropna().unique())
+    contract_col_for_filter = "CONTRACT_NAME"
+elif "CONTRACT_ID" in df.columns:
+    contract_col_for_filter = "CONTRACT_ID"
+else:
+    contract_col_for_filter = None
+
+if contract_col_for_filter:
+    # If parent org filter is active, only show contracts belonging to those orgs
+    if has_parent_org and selected_parents:
+        contracts_in_scope = sorted(
+            df[df["PARENT_ORGANIZATION"].isin(selected_parents)][contract_col_for_filter]
+            .dropna().unique()
+        )
+    else:
+        contracts_in_scope = sorted(df[contract_col_for_filter].dropna().unique())
+
     selected_contracts = st.sidebar.multiselect(
-        "Contract / Plan", contracts, default=contracts[:20]
+        "Contract / Plan",
+        options=contracts_in_scope,
+        default=contracts_in_scope[:20],
+        help="List updates automatically based on selected parent organizations"
     )
+    st.sidebar.caption(f"{len(contracts_in_scope):,} contracts available for selected parent org(s)")
 else:
     selected_contracts = None
 
 # ── Apply filters ─────────────────────────────────────────────────────────────
 mask = df["REPORT_PERIOD"].isin(periods_loaded)
-if selected_parents and has_parent_org:
+
+# Apply parent org filter first
+if has_parent_org and selected_parents:
     mask &= df["PARENT_ORGANIZATION"].isin(selected_parents)
+
+# Apply state filter
 if selected_states and "STATE" in df.columns:
     mask &= df["STATE"].isin(selected_states)
-if selected_contracts and "CONTRACT_NAME" in df.columns:
-    mask &= df["CONTRACT_NAME"].isin(selected_contracts)
+
+# Apply contract filter — only if a contract_col_for_filter was found
+if selected_contracts and contract_col_for_filter and contract_col_for_filter in df.columns:
+    mask &= df[contract_col_for_filter].isin(selected_contracts)
+
 filtered = df[mask].copy()
 
 # ── KPI row ───────────────────────────────────────────────────────────────────
