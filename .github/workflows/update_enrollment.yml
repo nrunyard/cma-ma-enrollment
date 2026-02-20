@@ -24,9 +24,9 @@ jobs:
       - name: Run enrollment script
         run: python cms_ma_enrollment_rolling_24mo.py
 
-      - name: Upload CSV as downloadable artifact
+      - name: Save CSV as downloadable artifact
         uses: actions/upload-artifact@v4
         with:
           name: ma-enrollment-rolling-24mo
           path: ma_enrollment_rolling_24mo_*.csv
-          retention-days: 90   # GitHub keeps it for 90 days before auto-deleting
+          retention-days: 90
