@@ -215,15 +215,28 @@ def download_period(period: str, zip_url: str) -> pd.DataFrame | None:
     df.insert(0, "REPORT_PERIOD", period)
 
     # Standardise enrollment column
-    enroll_col = next(
-        (c for c in df.columns
-         if any(k in c for k in ("ENROLL", "MEMBER", "BENE"))
-         and "REPORT" not in c),
-        None,
-    )
+    # Use the "Enrolled" column directly — this is the member count column in the SCC file
+    if "ENROLLED" in df.columns:
+        enroll_col = "ENROLLED"
+    else:
+        # Fallback: find any column with ENROLL/MEMBER/BENE in the name
+        enroll_col = next(
+            (c for c in df.columns
+             if any(k in c for k in ("ENROLL", "MEMBER", "BENE"))
+             and "REPORT" not in c),
+            None,
+        )
+
     if enroll_col:
         df = df.rename(columns={enroll_col: "ENROLLMENT"})
-    df["ENROLLMENT"] = pd.to_numeric(df.get("ENROLLMENT", pd.Series(dtype=float)), errors="coerce")
+
+    if "ENROLLMENT" in df.columns:
+        raw = df["ENROLLMENT"].astype(str).str.strip()
+        numeric_vals = pd.to_numeric(raw, errors="coerce")
+        # CMS suppresses counts under 11 with "*" — substitute with 5 as midpoint estimate
+        suppressed = numeric_vals.isna() & raw.notna() & (raw != "") & (raw.str.lower() != "nan")
+        numeric_vals[suppressed] = 5
+        df["ENROLLMENT"] = numeric_vals
 
     # Standardise other column names
     rename_map = {}
@@ -513,7 +526,9 @@ st.caption(
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Latest Period",    latest_period)
-c2.metric("Total Enrollment", f"{latest_enroll:,.0f}")
+c2.metric("Total Enrollment", f"{latest_enroll:,.0f}",
+          help="CMS suppresses county-level counts under 11 enrollees. "
+               "Those rows are estimated at 5 each and included in this total.")
 c3.metric(
     "MoM Change",
     f"{mom_delta:+,.0f}" if mom_delta is not None else "—",
