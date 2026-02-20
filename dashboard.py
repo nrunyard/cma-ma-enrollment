@@ -1,7 +1,7 @@
 """
 CMS MA Enrollment – Rolling 24-Month Dashboard
 ===============================================
-Pulls data live from CMS.gov — no local CSV needed.
+Pulls data live from CMS.gov on demand — no local CSV needed.
 Run locally:  streamlit run dashboard.py
 Hosted on:    Streamlit Community Cloud
 """
@@ -27,7 +27,7 @@ CMS_INDEX_URL = (
     "medicare-advantagepart-d-contract-and-enrollment-data/"
     "monthly-ma-enrollment-state/county/contract"
 )
-CMS_BASE_URL = "https://www.cms.gov"
+CMS_BASE_URL  = "https://www.cms.gov"
 ROLLING_MONTHS = 24
 
 HEADERS = {
@@ -40,16 +40,21 @@ HEADERS = {
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
 
-SKIP_PATTERNS = re.compile(r"(read_?me|readme|__macosx|\.ds_store)", re.I)
-DATA_PREF     = re.compile(r"(scc|enrollment|enroll|ma_)", re.I)
+SKIP_RE = re.compile(r"(read_?me|readme|__macosx|\.ds_store)", re.I)
+DATA_RE = re.compile(r"(scc|enrollment|enroll|ma_)", re.I)
 
 
-# ── CMS scraping helpers (cached aggressively) ────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 @st.cache_data(ttl=86400, show_spinner=False)
-def get_scc_subpage_links() -> dict:
-    r = SESSION.get(CMS_INDEX_URL, timeout=30)
-    r.raise_for_status()
-    soup = BeautifulSoup(r.text, "html.parser")
+def get_available_periods() -> dict:
+    """Scrape the CMS index and return {period: subpage_url}."""
+    try:
+        r = SESSION.get(CMS_INDEX_URL, timeout=30)
+        r.raise_for_status()
+    except Exception as e:
+        st.error(f"Could not reach CMS.gov: {e}")
+        return {}
+    soup  = BeautifulSoup(r.text, "html.parser")
     links = {}
     for a in soup.find_all("a", href=True):
         href = a["href"]
@@ -83,13 +88,12 @@ def download_period(period: str, zip_url: str) -> pd.DataFrame | None:
     except Exception:
         return None
 
-    content = r.content
     try:
-        with zipfile.ZipFile(io.BytesIO(content)) as zf:
+        with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
             candidates = [
                 n for n in zf.namelist()
                 if re.search(r"\.(csv|txt)$", n, re.I)
-                and not SKIP_PATTERNS.search(n)
+                and not SKIP_RE.search(n)
                 and not n.endswith("/")
             ]
             if not candidates:
@@ -101,9 +105,9 @@ def download_period(period: str, zip_url: str) -> pd.DataFrame | None:
                 ]
             if not candidates:
                 return None
-            preferred = [n for n in candidates if DATA_PREF.search(n)]
-            data_name = preferred[0] if preferred else candidates[0]
-            raw_bytes = zf.read(data_name)
+            preferred  = [n for n in candidates if DATA_RE.search(n)]
+            data_name  = preferred[0] if preferred else candidates[0]
+            raw_bytes  = zf.read(data_name)
     except zipfile.BadZipFile:
         return None
 
@@ -128,131 +132,155 @@ def download_period(period: str, zip_url: str) -> pd.DataFrame | None:
 
     df.columns = [c.strip().upper().replace(" ", "_") for c in df.columns]
     df.insert(0, "REPORT_PERIOD", period)
+
+    # Standardise enrollment column
+    enroll_col = next(
+        (c for c in df.columns if any(k in c for k in ("ENROLL", "MEMBER", "BENE"))
+         and "REPORT" not in c),
+        None,
+    )
+    if enroll_col:
+        df = df.rename(columns={enroll_col: "ENROLLMENT"})
+    df["ENROLLMENT"] = pd.to_numeric(df.get("ENROLLMENT", pd.Series()), errors="coerce")
+
+    # Standardise common column names
+    rename_map = {}
+    for col in df.columns:
+        if col in ("ENROLLMENT", "REPORT_PERIOD"):
+            continue
+        if "STATE" in col and "FIPS" not in col and col not in rename_map.values():
+            rename_map[col] = "STATE"
+        elif "COUNTY" in col and "FIPS" not in col and "STATE" not in col and col not in rename_map.values():
+            rename_map[col] = "COUNTY"
+        elif re.search(r"CONTRACT.*(ID|NBR|NUM)", col) and "CONTRACT_ID" not in rename_map.values():
+            rename_map[col] = "CONTRACT_ID"
+        elif re.search(r"(CONTRACT|ORG).*(NAME|NM)", col) and "CONTRACT_NAME" not in rename_map.values():
+            rename_map[col] = "CONTRACT_NAME"
+    df = df.rename(columns=rename_map)
+
     return df
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def load_all_data() -> pd.DataFrame:
-    all_links = get_scc_subpage_links()
-    periods   = sorted(all_links.keys(), reverse=True)[:ROLLING_MONTHS]
-
-    frames = []
-    progress = st.progress(0, text="Loading CMS data…")
-    for i, period in enumerate(sorted(periods)):
-        progress.progress((i + 1) / len(periods), text=f"Loading {period}…")
-        zip_url = get_zip_url(all_links[period])
-        if not zip_url:
-            continue
-        df = download_period(period, zip_url)
-        if df is not None and not df.empty:
-            frames.append(df)
-    progress.empty()
-
-    if not frames:
-        return pd.DataFrame()
-
-    combined = pd.concat(frames, ignore_index=True)
-
-    # Standardise enrollment column
-    enroll_candidates = [
-        c for c in combined.columns
-        if any(k in c for k in ("ENROLL", "MEMBER", "BENE", "COUNT"))
-        and "REPORT" not in c
-    ]
-    if enroll_candidates:
-        combined = combined.rename(columns={enroll_candidates[0]: "ENROLLMENT"})
-    combined["ENROLLMENT"] = pd.to_numeric(combined["ENROLLMENT"], errors="coerce")
-
-    # Standardise other column names
-    rename_map = {}
-    for col in combined.columns:
-        if col in ("ENROLLMENT", "REPORT_PERIOD"):
-            continue
-        if "STATE" in col and "FIPS" not in col:
-            rename_map[col] = "STATE"
-        elif "COUNTY" in col and "FIPS" not in col and "STATE" not in col:
-            rename_map[col] = "COUNTY"
-        elif re.search(r"CONTRACT.*(ID|NBR|NUM)", col):
-            rename_map[col] = "CONTRACT_ID"
-        elif re.search(r"(CONTRACT|ORG).*(NAME|NM)", col):
-            rename_map[col] = "CONTRACT_NAME"
-    combined = combined.rename(columns=rename_map)
-
-    return combined
+def normalise(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep only the columns we actually use to reduce memory."""
+    keep = ["REPORT_PERIOD", "ENROLLMENT"]
+    for c in ["STATE", "COUNTY", "CONTRACT_ID", "CONTRACT_NAME"]:
+        if c in df.columns:
+            keep.append(c)
+    return df[keep].copy()
 
 
-# ── Load data with a nice spinner ─────────────────────────────────────────────
-with st.spinner("Fetching latest CMS enrollment data (first load may take ~60s)…"):
-    df = load_all_data()
-
-if df.empty:
-    st.error("Could not load data from CMS. Please try refreshing.")
-    st.stop()
-
-# ── Sidebar filters ───────────────────────────────────────────────────────────
+# ── Sidebar – period selector ─────────────────────────────────────────────────
 st.sidebar.image(
     "https://www.cms.gov/themes/custom/cms_evo/logo.svg", width=160
 )
-st.sidebar.title("Filters")
+st.sidebar.title("CMS MA Enrollment")
 
-periods = sorted(df["REPORT_PERIOD"].dropna().unique())
+with st.sidebar:
+    with st.spinner("Fetching available periods from CMS…"):
+        all_periods_map = get_available_periods()
+
+if not all_periods_map:
+    st.error("Could not retrieve period list from CMS.gov. Please refresh.")
+    st.stop()
+
+all_periods = sorted(all_periods_map.keys(), reverse=True)[:ROLLING_MONTHS]
+all_periods_sorted = sorted(all_periods)   # oldest → newest for display
+
+st.sidebar.markdown("### Select Periods")
+st.sidebar.caption("Start with 3–6 months for fastest load.")
 
 selected_periods = st.sidebar.multiselect(
-    "Report Period(s)", options=periods, default=periods,
+    "Report Period(s)",
+    options=all_periods_sorted,
+    default=all_periods_sorted[-6:],   # default: most recent 6 months
 )
+
+if not selected_periods:
+    st.info("👈 Select at least one period in the sidebar to begin.")
+    st.stop()
+
+# ── Load selected periods ─────────────────────────────────────────────────────
+st.title("🏥 CMS Medicare Advantage Enrollment")
+
+frames = []
+failed = []
+progress_bar = st.progress(0, text="Loading data…")
+
+for i, period in enumerate(sorted(selected_periods)):
+    progress_bar.progress((i + 1) / len(selected_periods), text=f"Loading {period}…")
+    zip_url = get_zip_url(all_periods_map[period])
+    if not zip_url:
+        failed.append(period)
+        continue
+    df_period = download_period(period, zip_url)
+    if df_period is not None and not df_period.empty:
+        frames.append(normalise(df_period))
+    else:
+        failed.append(period)
+
+progress_bar.empty()
+
+if failed:
+    st.warning(f"Could not load data for: {', '.join(failed)}")
+
+if not frames:
+    st.error("No data could be loaded. Please try different periods.")
+    st.stop()
+
+df = pd.concat(frames, ignore_index=True)
+
+# ── Additional sidebar filters ────────────────────────────────────────────────
+periods_loaded = sorted(df["REPORT_PERIOD"].dropna().unique())
 
 if "STATE" in df.columns:
     states = sorted(df["STATE"].dropna().unique())
-    selected_states = st.sidebar.multiselect(
-        "State(s)", options=states, default=states,
-    )
+    selected_states = st.sidebar.multiselect("State(s)", states, default=states)
 else:
     selected_states = None
 
 if "CONTRACT_NAME" in df.columns:
     contracts = sorted(df["CONTRACT_NAME"].dropna().unique())
     selected_contracts = st.sidebar.multiselect(
-        "Contract / Plan", options=contracts, default=contracts[:20],
+        "Contract / Plan", contracts, default=contracts[:20]
     )
 else:
     selected_contracts = None
 
 # ── Apply filters ─────────────────────────────────────────────────────────────
-mask = df["REPORT_PERIOD"].isin(selected_periods)
+mask = df["REPORT_PERIOD"].isin(periods_loaded)
 if selected_states and "STATE" in df.columns:
     mask &= df["STATE"].isin(selected_states)
 if selected_contracts and "CONTRACT_NAME" in df.columns:
     mask &= df["CONTRACT_NAME"].isin(selected_contracts)
 filtered = df[mask].copy()
 
-# ── Header ────────────────────────────────────────────────────────────────────
-st.title("🏥 CMS Medicare Advantage Enrollment")
-st.caption(
-    f"Rolling 24-month view  ·  "
-    f"Periods: **{periods[0]}** – **{periods[-1]}**  ·  "
-    f"{len(filtered):,} rows after filters"
-)
-
 # ── KPI row ───────────────────────────────────────────────────────────────────
-latest_period   = periods[-1]
-previous_period = periods[-2] if len(periods) >= 2 else None
+latest_period   = periods_loaded[-1]
+previous_period = periods_loaded[-2] if len(periods_loaded) >= 2 else None
 latest_enroll   = filtered[filtered["REPORT_PERIOD"] == latest_period]["ENROLLMENT"].sum()
 previous_enroll = (
     filtered[filtered["REPORT_PERIOD"] == previous_period]["ENROLLMENT"].sum()
     if previous_period else None
 )
-mom_delta = latest_enroll - previous_enroll if previous_enroll else None
+mom_delta = (latest_enroll - previous_enroll) if previous_enroll else None
 mom_pct   = (mom_delta / previous_enroll * 100) if previous_enroll else None
 
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Latest Period",    latest_period)
-col2.metric("Total Enrollment", f"{latest_enroll:,.0f}")
-col3.metric(
+st.caption(
+    f"Loaded **{len(periods_loaded)}** period(s): "
+    f"**{periods_loaded[0]}** – **{periods_loaded[-1]}**  ·  "
+    f"{len(filtered):,} rows"
+)
+
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Latest Period",    latest_period)
+c2.metric("Total Enrollment", f"{latest_enroll:,.0f}")
+c3.metric(
     "MoM Change",
     f"{mom_delta:+,.0f}" if mom_delta is not None else "—",
     delta=f"{mom_pct:+.2f}%" if mom_pct is not None else None,
 )
-col4.metric("Periods Selected", len(selected_periods))
+c4.metric("Periods Loaded", len(periods_loaded))
 st.divider()
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
@@ -263,6 +291,7 @@ tab1, tab2, tab3, tab4 = st.tabs([
     "🔄 Month-over-Month",
 ])
 
+# Tab 1 ── Trend
 with tab1:
     trend = (
         filtered.groupby("REPORT_PERIOD")["ENROLLMENT"]
@@ -278,15 +307,15 @@ with tab1:
     with st.expander("View data table"):
         st.dataframe(trend, use_container_width=True)
 
+# Tab 2 ── State / County
 with tab2:
     if "STATE" not in df.columns:
         st.info("No STATE column found in this dataset.")
     else:
-        geo_col = st.radio(
-            "Group by",
-            ["STATE", "COUNTY"] if "COUNTY" in df.columns else ["STATE"],
-            horizontal=True,
-        )
+        options = ["STATE"]
+        if "COUNTY" in df.columns:
+            options.append("COUNTY")
+        geo_col = st.radio("Group by", options, horizontal=True)
         geo = (
             filtered[filtered["REPORT_PERIOD"] == latest_period]
             .groupby(geo_col)["ENROLLMENT"].sum()
@@ -306,11 +335,14 @@ with tab2:
             )
             st.dataframe(full_geo, use_container_width=True)
 
+# Tab 3 ── Contract / Plan
 with tab3:
-    if "CONTRACT_NAME" not in df.columns and "CONTRACT_ID" not in df.columns:
+    contract_col = next(
+        (c for c in ["CONTRACT_NAME", "CONTRACT_ID"] if c in df.columns), None
+    )
+    if not contract_col:
         st.info("No contract/plan column found in this dataset.")
     else:
-        contract_col = "CONTRACT_NAME" if "CONTRACT_NAME" in df.columns else "CONTRACT_ID"
         top_n = st.slider("Show top N contracts", 5, 50, 15)
         contracts_data = (
             filtered[filtered["REPORT_PERIOD"] == latest_period]
@@ -319,25 +351,26 @@ with tab3:
         )
         fig3 = px.bar(
             contracts_data, x="ENROLLMENT", y=contract_col, orientation="h",
-            title=f"Top {top_n} Contracts by Enrollment — {latest_period}",
+            title=f"Top {top_n} Contracts — {latest_period}",
             color="ENROLLMENT", color_continuous_scale="Teal",
         )
         fig3.update_layout(yaxis={"categoryorder": "total ascending"})
         st.plotly_chart(fig3, use_container_width=True)
         with st.expander("View full table"):
-            all_contracts = (
+            all_c = (
                 filtered[filtered["REPORT_PERIOD"] == latest_period]
                 .groupby(contract_col)["ENROLLMENT"].sum()
                 .reset_index().sort_values("ENROLLMENT", ascending=False)
             )
-            st.dataframe(all_contracts, use_container_width=True)
+            st.dataframe(all_c, use_container_width=True)
 
+# Tab 4 ── MoM
 with tab4:
     group_choices = [c for c in ["STATE", "CONTRACT_NAME", "CONTRACT_ID"] if c in df.columns]
     if not group_choices:
-        st.info("No grouping column available for MoM analysis.")
+        st.info("No grouping column available.")
     elif not previous_period:
-        st.info("Need at least 2 periods selected to show month-over-month changes.")
+        st.info("Select at least 2 periods in the sidebar to see month-over-month changes.")
     else:
         group_choice = st.selectbox("Compare MoM by", group_choices)
         curr = filtered[filtered["REPORT_PERIOD"] == latest_period].groupby(group_choice)["ENROLLMENT"].sum()
@@ -347,14 +380,18 @@ with tab4:
         mom["CHANGE_%"] = (mom["CHANGE"] / mom["PREVIOUS"] * 100).round(2)
         mom = mom.reset_index().sort_values("CHANGE", ascending=False)
 
+        fmt = {
+            "PREVIOUS": "{:,.0f}", "CURRENT": "{:,.0f}",
+            "CHANGE": "{:+,.0f}", "CHANGE_%": "{:+.2f}%",
+        }
+        cols_show = [group_choice, "PREVIOUS", "CURRENT", "CHANGE", "CHANGE_%"]
         col_a, col_b = st.columns(2)
-        fmt = {"PREVIOUS": "{:,.0f}", "CURRENT": "{:,.0f}", "CHANGE": "{:+,.0f}", "CHANGE_%": "{:+.2f}%"}
         with col_a:
             st.subheader(f"📈 Biggest Gainers  ({previous_period} → {latest_period})")
-            st.dataframe(mom.head(15)[[group_choice, "PREVIOUS", "CURRENT", "CHANGE", "CHANGE_%"]].style.format(fmt), use_container_width=True)
+            st.dataframe(mom.head(15)[cols_show].style.format(fmt), use_container_width=True)
         with col_b:
             st.subheader("📉 Biggest Decliners")
-            st.dataframe(mom.tail(15)[[group_choice, "PREVIOUS", "CURRENT", "CHANGE", "CHANGE_%"]].sort_values("CHANGE").style.format(fmt), use_container_width=True)
+            st.dataframe(mom.tail(15)[cols_show].sort_values("CHANGE").style.format(fmt), use_container_width=True)
 
         fig4 = px.bar(
             mom.head(20), x=group_choice, y="CHANGE",
