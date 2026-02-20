@@ -861,7 +861,7 @@ if has_parent_org:
             .reset_index().sort_values("ENROLLMENT", ascending=False)
         )
 
-        top_n_p = st.slider("Show top N parent orgs", 5, 30, 15, key="parent_slider")
+        top_n_p = 15
 
         fig5 = px.bar(
             parent_enroll.head(top_n_p),
