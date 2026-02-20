@@ -157,14 +157,27 @@ def load_plan_directory() -> pd.DataFrame:
     if contract_col is None or parent_col is None:
         return pd.DataFrame(columns=["CONTRACT_ID", "PARENT_ORGANIZATION"])
 
+    # Find plan/contract type column in directory
+    type_col = next(
+        (c for c in df.columns if re.search(r"(PLAN|CONTRACT).*(TYPE|TYP)", c)), None
+    )
+
+    keep_cols = [contract_col, parent_col]
+    rename_dict = {contract_col: "CONTRACT_ID", parent_col: "PARENT_ORGANIZATION"}
+    if type_col:
+        keep_cols.append(type_col)
+        rename_dict[type_col] = "PLAN_TYPE_DIR"
+
     lookup = (
-        df[[contract_col, parent_col]]
-        .rename(columns={contract_col: "CONTRACT_ID", parent_col: "PARENT_ORGANIZATION"})
+        df[keep_cols]
+        .rename(columns=rename_dict)
         .dropna(subset=["CONTRACT_ID"])
         .drop_duplicates(subset=["CONTRACT_ID"])
     )
-    lookup["CONTRACT_ID"]       = lookup["CONTRACT_ID"].str.strip().str.upper()
+    lookup["CONTRACT_ID"]         = lookup["CONTRACT_ID"].str.strip().str.upper()
     lookup["PARENT_ORGANIZATION"] = lookup["PARENT_ORGANIZATION"].str.strip().str.title()
+    if "PLAN_TYPE_DIR" in lookup.columns:
+        lookup["PLAN_TYPE_DIR"] = lookup["PLAN_TYPE_DIR"].str.strip().str.title()
     return lookup
 
 
@@ -229,6 +242,20 @@ def download_period(period: str, zip_url: str) -> pd.DataFrame | None:
 
     return df
 
+
+# Contract type label map derived from the first letter of CONTRACT_ID
+CONTRACT_TYPE_MAP = {
+    "H": "Local MA / HMO / Cost / PACE",
+    "R": "Regional PPO",
+    "S": "Standalone PDP",
+    "E": "Employer / Union Direct",
+    "9": "Other / Demo",
+}
+
+def derive_contract_type(contract_id_series: pd.Series) -> pd.Series:
+    """Return a human-readable contract type from the first char of CONTRACT_ID."""
+    first_char = contract_id_series.astype(str).str.strip().str.upper().str[0]
+    return first_char.map(CONTRACT_TYPE_MAP).fillna("Other")
 
 def normalise(df: pd.DataFrame) -> pd.DataFrame:
     keep = ["REPORT_PERIOD", "ENROLLMENT"]
@@ -314,6 +341,14 @@ if not plan_dir.empty and "CONTRACT_ID" in df.columns:
     df = df.merge(plan_dir, on="CONTRACT_ID", how="left")
     has_parent_org = "PARENT_ORGANIZATION" in df.columns and df["PARENT_ORGANIZATION"].notna().any()
 
+    # Derive CONTRACT_TYPE from CONTRACT_ID first letter (works even without directory)
+    if "CONTRACT_ID" in df.columns:
+        # Prefer directory plan type if available and well-populated
+        if "PLAN_TYPE_DIR" in df.columns and df["PLAN_TYPE_DIR"].notna().mean() > 0.5:
+            df["CONTRACT_TYPE"] = df["PLAN_TYPE_DIR"]
+        else:
+            df["CONTRACT_TYPE"] = derive_contract_type(df["CONTRACT_ID"])
+
     # ── Debug expander ────────────────────────────────────────────────────────
     total_rows     = len(df)
     matched_rows   = df["PARENT_ORGANIZATION"].notna().sum()
@@ -348,6 +383,9 @@ if not plan_dir.empty and "CONTRACT_ID" in df.columns:
             st.markdown(f"**Sample IDs from enrollment data:** `{enroll_sample}`")
 else:
     has_parent_org = False
+    # Still derive contract type from CONTRACT_ID even without the directory
+    if "CONTRACT_ID" in df.columns:
+        df["CONTRACT_TYPE"] = derive_contract_type(df["CONTRACT_ID"])
 
 # ── Additional sidebar filters ────────────────────────────────────────────────
 periods_loaded = sorted(df["REPORT_PERIOD"].dropna().unique())
@@ -387,6 +425,25 @@ if "STATE" in df.columns:
 else:
     selected_states = None
 
+# Contract Type filter — cascades from parent org selection
+if "CONTRACT_TYPE" in df.columns:
+    if has_parent_org and selected_parents:
+        types_in_scope = sorted(
+            df[df["PARENT_ORGANIZATION"].isin(selected_parents)]["CONTRACT_TYPE"]
+            .dropna().unique()
+        )
+    else:
+        types_in_scope = sorted(df["CONTRACT_TYPE"].dropna().unique())
+
+    selected_contract_types = st.sidebar.multiselect(
+        "📄 Contract Type",
+        options=types_in_scope,
+        default=types_in_scope,
+        help="HMO, Regional PPO, PDP, etc. — derived from contract ID prefix",
+    )
+else:
+    selected_contract_types = None
+
 # Contract/Plan filter — scoped to whichever parent orgs are selected above
 if "CONTRACT_NAME" in df.columns:
     contract_col_for_filter = "CONTRACT_NAME"
@@ -421,6 +478,10 @@ mask = df["REPORT_PERIOD"].isin(periods_loaded)
 # Apply parent org filter first
 if has_parent_org and selected_parents:
     mask &= df["PARENT_ORGANIZATION"].isin(selected_parents)
+
+# Apply contract type filter
+if selected_contract_types and "CONTRACT_TYPE" in df.columns:
+    mask &= df["CONTRACT_TYPE"].isin(selected_contract_types)
 
 # Apply state filter
 if selected_states and "STATE" in df.columns:
